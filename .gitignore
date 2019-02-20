@@ -1,0 +1,4 @@
+/gun/tests/node_modules
+/gun/tests/ossl
+/gun/tests/radata-server
+/gun/tests/package-lock.json
