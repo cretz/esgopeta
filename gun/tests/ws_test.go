@@ -1,9 +1,11 @@
 package tests
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
+	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -19,15 +21,47 @@ func (t *testContext) startGunWebSocketProxyLogger(listenPort, targetPort int) {
 				if !ok {
 					return
 				}
-				t.debugf("From gun: %v", string(msg))
+				if testing.Verbose() {
+					for _, s := range t.formattedGunJSONs(msg) {
+						t.debugf("From gun: %v", s)
+					}
+				}
 			case msg, ok := <-toGun:
 				if !ok {
 					return
 				}
-				t.debugf("To gun: %v", string(msg))
+				if testing.Verbose() {
+					for _, s := range t.formattedGunJSONs(msg) {
+						t.debugf("To gun: %v", s)
+					}
+				}
 			}
 		}
 	}()
+}
+
+func (t *testContext) formattedGunJSONs(msg []byte) []string {
+	var objs []interface{}
+	if msg[0] == '[' {
+		arr := []string{}
+		t.Require.NoError(json.Unmarshal(msg, &arr))
+		for _, v := range arr {
+			var obj interface{}
+			t.Require.NoError(json.Unmarshal([]byte(v), &obj))
+			objs = append(objs, obj)
+		}
+	} else {
+		var obj interface{}
+		t.Require.NoError(json.Unmarshal(msg, &obj))
+		objs = append(objs, obj)
+	}
+	ret := make([]string, len(objs))
+	for i, obj := range objs {
+		b, err := json.MarshalIndent(obj, "", "  ")
+		t.Require.NoError(err)
+		ret[i] = string(b)
+	}
+	return ret
 }
 
 func (t *testContext) startGunWebSocketProxy(listenPort, targetPort int) (fromTarget <-chan []byte, toTarget <-chan []byte) {

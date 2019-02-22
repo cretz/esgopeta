@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -62,6 +63,8 @@ func (t *testContext) startJS(script string) (*bytes.Buffer, *exec.Cmd, context.
 }
 
 func (t *testContext) startGunServer(port int) {
+	// Remove entire data folder first
+	t.Require.NoError(os.RemoveAll("rodata-server"))
 	t.startJS(`
 		var Gun = require('gun')
 		const server = require('http').createServer().listen(` + strconv.Itoa(port) + `)
