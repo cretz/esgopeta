@@ -13,6 +13,7 @@ type Gun struct {
 	soulGen          func() string
 	peerErrorHandler func(*ErrPeer)
 	peerSleepOnError time.Duration
+	myPeerID         string
 
 	messageIDPutListeners     map[string]chan<- *MessageReceived
 	messageIDPutListenersLock sync.RWMutex
@@ -24,6 +25,7 @@ type Config struct {
 	SoulGen          func() string
 	PeerErrorHandler func(*ErrPeer)
 	PeerSleepOnError time.Duration
+	MyPeerID         string
 }
 
 const DefaultPeerSleepOnError = 30 * time.Second
@@ -35,6 +37,7 @@ func New(ctx context.Context, config Config) (*Gun, error) {
 		soulGen:               config.SoulGen,
 		peerErrorHandler:      config.PeerErrorHandler,
 		peerSleepOnError:      config.PeerSleepOnError,
+		myPeerID:              config.MyPeerID,
 		messageIDPutListeners: map[string]chan<- *MessageReceived{},
 	}
 	// Create all the peers
@@ -46,7 +49,7 @@ func New(ctx context.Context, config Config) (*Gun, error) {
 	for i := 0; i < len(config.PeerURLs) && err == nil; i++ {
 		peerURL := config.PeerURLs[i]
 		connPeer := func() (Peer, error) { return NewPeer(ctx, peerURL) }
-		if g.peers[i], err = newGunPeer(connPeer, sleepOnError); err != nil {
+		if g.peers[i], err = newGunPeer(peerURL, connPeer, sleepOnError); err != nil {
 			err = fmt.Errorf("Failed connecting to peer %v: %v", peerURL, err)
 		}
 	}
@@ -65,6 +68,9 @@ func New(ctx context.Context, config Config) (*Gun, error) {
 	}
 	if g.soulGen == nil {
 		g.soulGen = SoulGenDefault
+	}
+	if g.myPeerID == "" {
+		g.myPeerID = randString(9)
 	}
 	// Start receiving
 	g.startReceiving()
@@ -123,7 +129,7 @@ func (g *Gun) startReceiving() {
 			// TDO: some kind of overall context is probably needed
 			ctx, cancelFn := context.WithCancel(context.TODO())
 			defer cancelFn()
-			for {
+			for !peer.closed() {
 				// We might not be able receive because peer is sleeping from
 				// an error happened within or a just-before send error.
 				if ok, msgs, err := peer.receive(ctx); !ok {
@@ -135,17 +141,7 @@ func (g *Gun) startReceiving() {
 				} else {
 					// Go over each message and see if it needs delivering or rebroadcasting
 					for _, msg := range msgs {
-						rMsg := &MessageReceived{Message: msg, peer: peer}
-						if msg.Ack != "" && len(msg.Put) > 0 {
-							g.messageIDPutListenersLock.RLock()
-							l := g.messageIDPutListeners[msg.Ack]
-							g.messageIDPutListenersLock.RUnlock()
-							if l != nil {
-								go safeReceivedMessageSend(l, rMsg)
-								continue
-							}
-						}
-						go g.onUnhandledMessage(rMsg)
+						g.onPeerMessage(ctx, &MessageReceived{Message: msg, peer: peer})
 					}
 				}
 			}
@@ -153,10 +149,33 @@ func (g *Gun) startReceiving() {
 	}
 }
 
-func (g *Gun) onUnhandledMessage(msg *MessageReceived) {
+func (g *Gun) onPeerMessage(ctx context.Context, msg *MessageReceived) {
+	// If there is a listener for this message, use it
+	if msg.Ack != "" && len(msg.Put) > 0 {
+		g.messageIDPutListenersLock.RLock()
+		l := g.messageIDPutListeners[msg.Ack]
+		g.messageIDPutListenersLock.RUnlock()
+		if l != nil {
+			go safeReceivedMessageSend(l, msg)
+			return
+		}
+	}
+	// DAM messages are either requests for our ID or setting of theirs
+	if msg.DAM != "" {
+		if msg.PID == "" {
+			// This is a request, set the PID and send it back
+			msg.PID = g.myPeerID
+			if _, err := msg.peer.send(ctx, msg.Message); err != nil {
+				go g.onPeerError(&ErrPeer{err, msg.peer})
+			}
+		} else {
+			// This is them telling us theirs
+			msg.peer.id = msg.PID
+		}
+		return
+	}
 	// Unhandled message means rebroadcast
-	// TODO: we need a timeout or global context here...
-	g.send(context.TODO(), msg.Message, msg.peer)
+	g.send(ctx, msg.Message, msg.peer)
 }
 
 func (g *Gun) onPeerError(err *ErrPeer) {

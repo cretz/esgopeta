@@ -61,8 +61,8 @@ func (n *Node) UnmarshalJSON(b []byte) error {
 }
 
 type Metadata struct {
-	Soul  string           `json:"#"`
-	State map[string]int64 `json:">"`
+	Soul  string           `json:"#,omitempty"`
+	State map[string]int64 `json:">,omitempty"`
 }
 
 type Value interface {

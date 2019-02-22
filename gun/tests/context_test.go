@@ -94,7 +94,13 @@ func (t *testContext) startGunJSServer() {
 }
 
 func (t *testContext) newGunConnectedToGunJS() *gun.Gun {
-	g, err := gun.NewFromPeerURLs(t, "http://127.0.0.1:"+strconv.Itoa(t.GunJSPort)+"/gun")
+	config := gun.Config{
+		PeerURLs: []string{"http://127.0.0.1:" + strconv.Itoa(t.GunJSPort) + "/gun"},
+		PeerErrorHandler: func(errPeer *gun.ErrPeer) {
+			t.debugf("Got peer error: %v", errPeer)
+		},
+	}
+	g, err := gun.New(t, config)
 	t.Require.NoError(err)
 	return g
 }

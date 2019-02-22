@@ -7,16 +7,18 @@ import (
 )
 
 type gunPeer struct {
+	url        string
 	connPeer   func() (Peer, error)
 	sleepOnErr time.Duration // TODO: would be better as backoff
+	id         string
 
 	peer     Peer
 	peerBad  bool // If true, don't try anything
 	peerLock sync.Mutex
 }
 
-func newGunPeer(connPeer func() (Peer, error), sleepOnErr time.Duration) (*gunPeer, error) {
-	p := &gunPeer{connPeer: connPeer, sleepOnErr: sleepOnErr}
+func newGunPeer(url string, connPeer func() (Peer, error), sleepOnErr time.Duration) (*gunPeer, error) {
+	p := &gunPeer{url: url, connPeer: connPeer, sleepOnErr: sleepOnErr}
 	var err error
 	if p.peer, err = connPeer(); err != nil {
 		return nil, err
@@ -24,9 +26,7 @@ func newGunPeer(connPeer func() (Peer, error), sleepOnErr time.Duration) (*gunPe
 	return p, nil
 }
 
-func (g *gunPeer) ID() string {
-	panic("TODO")
-}
+func (g *gunPeer) ID() string { return g.id }
 
 func (g *gunPeer) reconnectPeer() (err error) {
 	g.peerLock.Lock()
@@ -60,9 +60,20 @@ func (g *gunPeer) markPeerErrored(p Peer) {
 }
 
 func (g *gunPeer) send(ctx context.Context, msg *Message, moreMsgs ...*Message) (ok bool, err error) {
-	if p := g.connectedPeer(); p == nil {
+	p := g.connectedPeer()
+	if p == nil {
 		return false, nil
-	} else if err = p.Send(ctx, msg, moreMsgs...); err != nil {
+	}
+	// Clone them with peer "to"
+	updatedMsg := msg.Clone()
+	updatedMsg.To = g.url
+	updatedMoreMsgs := make([]*Message, len(moreMsgs))
+	for i, moreMsg := range moreMsgs {
+		moreMsg := moreMsg.Clone()
+		moreMsg.To = g.url
+		updatedMoreMsgs[i] = moreMsg
+	}
+	if err = p.Send(ctx, updatedMsg, updatedMoreMsgs...); err != nil {
 		g.markPeerErrored(p)
 		return false, err
 	} else {
@@ -88,4 +99,10 @@ func (g *gunPeer) Close() error {
 	g.peer = nil
 	g.peerBad = false
 	return err
+}
+
+func (g *gunPeer) closed() bool {
+	g.peerLock.Lock()
+	defer g.peerLock.Unlock()
+	return g.peer == nil && !g.peerBad
 }

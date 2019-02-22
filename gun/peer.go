@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sync"
 
 	"github.com/gorilla/websocket"
 )
@@ -24,7 +25,15 @@ type Peer interface {
 }
 
 var PeerURLSchemes = map[string]func(context.Context, *url.URL) (Peer, error){
-	"ws": func(ctx context.Context, peerUrl *url.URL) (Peer, error) { return NewPeerWebSocket(ctx, peerUrl) },
+	"http": func(ctx context.Context, peerURL *url.URL) (Peer, error) {
+		schemeChangedURL := &url.URL{}
+		*schemeChangedURL = *peerURL
+		schemeChangedURL.Scheme = "ws"
+		return NewPeerWebSocket(ctx, schemeChangedURL)
+	},
+	"ws": func(ctx context.Context, peerURL *url.URL) (Peer, error) {
+		return NewPeerWebSocket(ctx, peerURL)
+	},
 }
 
 func NewPeer(ctx context.Context, peerURL string) (Peer, error) {
@@ -39,6 +48,7 @@ func NewPeer(ctx context.Context, peerURL string) (Peer, error) {
 
 type PeerWebSocket struct {
 	Underlying *websocket.Conn
+	WriteLock  sync.Mutex
 }
 
 func NewPeerWebSocket(ctx context.Context, peerUrl *url.URL) (*PeerWebSocket, error) {
@@ -46,7 +56,7 @@ func NewPeerWebSocket(ctx context.Context, peerUrl *url.URL) (*PeerWebSocket, er
 	if err != nil {
 		return nil, err
 	}
-	return &PeerWebSocket{conn}, nil
+	return &PeerWebSocket{Underlying: conn}, nil
 }
 
 func (p *PeerWebSocket) Send(ctx context.Context, msg *Message, moreMsgs ...*Message) error {
@@ -70,7 +80,11 @@ func (p *PeerWebSocket) Send(ctx context.Context, msg *Message, moreMsgs ...*Mes
 	}
 	// Send async so we can wait on context
 	errCh := make(chan error, 1)
-	go func() { errCh <- p.Underlying.WriteJSON(toWrite) }()
+	go func() {
+		p.WriteLock.Lock()
+		defer p.WriteLock.Unlock()
+		errCh <- p.Underlying.WriteJSON(toWrite)
+	}()
 	select {
 	case err := <-errCh:
 		return err

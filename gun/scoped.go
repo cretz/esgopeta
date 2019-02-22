@@ -26,9 +26,10 @@ type messageIDListener struct {
 
 func newScoped(gun *Gun, parent *Scoped, field string) *Scoped {
 	return &Scoped{
-		gun:    gun,
-		parent: parent,
-		field:  field,
+		gun:                   gun,
+		parent:                parent,
+		field:                 field,
+		valueChansToListeners: map[<-chan *ValueFetch]*messageIDListener{},
 	}
 }
 

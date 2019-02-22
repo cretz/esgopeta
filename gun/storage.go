@@ -18,10 +18,18 @@ type StorageInMem struct {
 	values sync.Map
 }
 
+type parentSoulAndField struct{ parentSoul, field string }
+
 func (s *StorageInMem) Get(ctx context.Context, parentSoul, field string) (*ValueWithState, error) {
-	panic("TODO")
+	v, ok := s.values.Load(parentSoulAndField{parentSoul, field})
+	if !ok {
+		return nil, ErrStorageNotFound
+	}
+	return v.(*ValueWithState), nil
 }
 
 func (s *StorageInMem) Put(ctx context.Context, parentSoul, field string, val *ValueWithState) (bool, error) {
-	panic("TODO")
+	s.values.Store(parentSoulAndField{parentSoul, field}, val)
+	// TODO: conflict resolution state check?
+	return true, nil
 }

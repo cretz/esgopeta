@@ -2,6 +2,8 @@ package tests
 
 import (
 	"testing"
+
+	"github.com/cretz/esgopeta/gun"
 )
 
 func TestGunGetSimple(t *testing.T) {
@@ -22,7 +24,9 @@ func TestGunGetSimple(t *testing.T) {
 	`)
 	// Get
 	g := ctx.newGunConnectedToGunJS()
-	f := g.Scoped(ctx, "esgopeta-test", "TestGunGet", "some-key").Val(ctx)
+	f := g.Scoped(ctx, "esgopeta-test", "TestGunGetSimple", "some-key").Val(ctx)
 	ctx.Require.NoError(f.Err)
+	// Make sure we got back the same value
+	ctx.Require.Equal(gun.ValueString(randStr), f.Value.Value.(gun.ValueString))
 
 }

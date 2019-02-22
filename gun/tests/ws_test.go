@@ -22,6 +22,7 @@ func (t *testContext) startGunWebSocketProxyLogger(listenPort, targetPort int) {
 					return
 				}
 				if testing.Verbose() {
+					t.debugf("From gun raw: %v", string(msg))
 					for _, s := range t.formattedGunJSONs(msg) {
 						t.debugf("From gun: %v", s)
 					}
@@ -31,8 +32,13 @@ func (t *testContext) startGunWebSocketProxyLogger(listenPort, targetPort int) {
 					return
 				}
 				if testing.Verbose() {
-					for _, s := range t.formattedGunJSONs(msg) {
-						t.debugf("To gun: %v", s)
+					t.debugf("To gun raw: %v", string(msg))
+					if len(msg) == 0 {
+						t.debugf("To gun: empty message")
+					} else {
+						for _, s := range t.formattedGunJSONs(msg) {
+							t.debugf("To gun: %v", s)
+						}
 					}
 				}
 			}
