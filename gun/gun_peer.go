@@ -95,8 +95,11 @@ func (g *gunPeer) receive(ctx context.Context) (ok bool, msgs []*Message, err er
 func (g *gunPeer) Close() error {
 	g.peerLock.Lock()
 	defer g.peerLock.Unlock()
-	err := g.peer.Close()
-	g.peer = nil
+	var err error
+	if g.peer != nil {
+		err = g.peer.Close()
+		g.peer = nil
+	}
 	g.peerBad = false
 	return err
 }
