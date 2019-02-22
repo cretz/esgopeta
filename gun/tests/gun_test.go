@@ -24,9 +24,15 @@ func TestGunGetSimple(t *testing.T) {
 	`)
 	// Get
 	g := ctx.newGunConnectedToGunJS()
+	defer g.Close()
+	// Make sure we got back the same value
 	f := g.Scoped(ctx, "esgopeta-test", "TestGunGetSimple", "some-key").Val(ctx)
 	ctx.Require.NoError(f.Err)
-	// Make sure we got back the same value
-	ctx.Require.Equal(gun.ValueString(randStr), f.Value.Value.(gun.ValueString))
+	ctx.Require.Equal(gun.ValueString(randStr), f.Value.(gun.ValueString))
+	// // Do it again TODO: make sure there are no network calls, it's all from mem
+	// ctx.debugf("Asking for key again")
+	// f = g.Scoped(ctx, "esgopeta-test", "TestGunGetSimple", "some-key").Val(ctx)
+	// ctx.Require.NoError(f.Err)
+	// ctx.Require.Equal(gun.ValueString(randStr), f.Value.Value.(gun.ValueString))
 
 }

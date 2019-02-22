@@ -11,7 +11,7 @@ var ErrStorageNotFound = errors.New("Not found")
 type Storage interface {
 	Get(ctx context.Context, parentSoul, field string) (*ValueWithState, error)
 	Put(ctx context.Context, parentSoul, field string, val *ValueWithState) (bool, error)
-	// Tracking(ctx context.Context, id string) (bool, error)
+	Tracking(ctx context.Context, parentSoul, field string) (bool, error)
 }
 
 type StorageInMem struct {
@@ -32,4 +32,9 @@ func (s *StorageInMem) Put(ctx context.Context, parentSoul, field string, val *V
 	s.values.Store(parentSoulAndField{parentSoul, field}, val)
 	// TODO: conflict resolution state check?
 	return true, nil
+}
+
+func (s *StorageInMem) Tracking(ctx context.Context, parentSoul, field string) (bool, error) {
+	_, ok := s.values.Load(parentSoulAndField{parentSoul, field})
+	return ok, nil
 }

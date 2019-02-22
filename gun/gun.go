@@ -14,6 +14,7 @@ type Gun struct {
 	peerErrorHandler func(*ErrPeer)
 	peerSleepOnError time.Duration
 	myPeerID         string
+	tracking         Tracking
 
 	messageIDPutListeners     map[string]chan<- *MessageReceived
 	messageIDPutListenersLock sync.RWMutex
@@ -26,7 +27,16 @@ type Config struct {
 	PeerErrorHandler func(*ErrPeer)
 	PeerSleepOnError time.Duration
 	MyPeerID         string
+	Tracking         Tracking
 }
+
+type Tracking int
+
+const (
+	TrackingRequested Tracking = iota
+	TrackingNothing
+	TrackingEverything
+)
 
 const DefaultPeerSleepOnError = 30 * time.Second
 
@@ -38,6 +48,7 @@ func New(ctx context.Context, config Config) (*Gun, error) {
 		peerErrorHandler:      config.PeerErrorHandler,
 		peerSleepOnError:      config.PeerSleepOnError,
 		myPeerID:              config.MyPeerID,
+		tracking:              config.Tracking,
 		messageIDPutListeners: map[string]chan<- *MessageReceived{},
 	}
 	// Create all the peers
