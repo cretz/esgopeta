@@ -2,6 +2,7 @@ package gun
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 
@@ -10,20 +11,16 @@ import (
 
 type ErrPeer struct {
 	Err  error
-	Peer Peer
+	peer *gunPeer
 }
 
-func (e *ErrPeer) Error() string { return fmt.Sprintf("Error on peer %v: %v", e.Peer, e.Err) }
+func (e *ErrPeer) Error() string { return fmt.Sprintf("Error on peer %v: %v", e.peer, e.Err) }
 
 type Peer interface {
-	Send(ctx context.Context, msg *Message) error
-	Receive() <-chan *MessageOrError
+	Send(ctx context.Context, msg *Message, moreMsgs ...*Message) error
+	// Chan is closed on first err, when context is closed, or when peer is closed
+	Receive(ctx context.Context) ([]*Message, error)
 	Close() error
-}
-
-type MessageOrError struct {
-	Message *Message
-	Err     error
 }
 
 var PeerURLSchemes = map[string]func(context.Context, *url.URL) (Peer, error){
@@ -41,7 +38,7 @@ func NewPeer(ctx context.Context, peerURL string) (Peer, error) {
 }
 
 type PeerWebSocket struct {
-	*websocket.Conn
+	Underlying *websocket.Conn
 }
 
 func NewPeerWebSocket(ctx context.Context, peerUrl *url.URL) (*PeerWebSocket, error) {
@@ -52,10 +49,74 @@ func NewPeerWebSocket(ctx context.Context, peerUrl *url.URL) (*PeerWebSocket, er
 	return &PeerWebSocket{conn}, nil
 }
 
-func (p *PeerWebSocket) Send(ctx context.Context, msg *Message) error {
-	panic("TODO")
+func (p *PeerWebSocket) Send(ctx context.Context, msg *Message, moreMsgs ...*Message) error {
+	// If there are more, send all as an array of JSON strings, otherwise just the msg
+	var toWrite interface{}
+	if len(moreMsgs) == 0 {
+		toWrite = msg
+	} else {
+		b, err := json.Marshal(msg)
+		if err != nil {
+			return err
+		}
+		msgs := []string{string(b)}
+		for _, nextMsg := range moreMsgs {
+			if b, err = json.Marshal(nextMsg); err != nil {
+				return err
+			}
+			msgs = append(msgs, string(b))
+		}
+		toWrite = msgs
+	}
+	// Send async so we can wait on context
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.Underlying.WriteJSON(toWrite) }()
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
-func (p *PeerWebSocket) Receive() <-chan *MessageOrError {
-	panic("TODO")
+func (p *PeerWebSocket) Receive(ctx context.Context) ([]*Message, error) {
+	bytsCh := make(chan []byte, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		if _, b, err := p.Underlying.ReadMessage(); err != nil {
+			errCh <- err
+		} else {
+			bytsCh <- b
+		}
+	}()
+	select {
+	case err := <-errCh:
+		return nil, err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case byts := <-bytsCh:
+		// If it's a JSON array, it means it's an array of JSON strings, otherwise it's one message
+		if byts[0] != '[' {
+			var msg Message
+			if err := json.Unmarshal(byts, &msg); err != nil {
+				return nil, err
+			}
+			return []*Message{&msg}, nil
+		}
+		var jsonStrs []string
+		if err := json.Unmarshal(byts, &jsonStrs); err != nil {
+			return nil, err
+		}
+		msgs := make([]*Message, len(jsonStrs))
+		for i, jsonStr := range jsonStrs {
+			if err := json.Unmarshal([]byte(jsonStr), &(msgs[i])); err != nil {
+				return nil, err
+			}
+		}
+		return msgs, nil
+	}
+}
+
+func (p *PeerWebSocket) Close() error {
+	return p.Underlying.Close()
 }

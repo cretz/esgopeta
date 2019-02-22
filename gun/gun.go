@@ -4,35 +4,61 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 type Gun struct {
-	peers            []Peer
+	peers            []*gunPeer
 	storage          Storage
 	soulGen          func() string
 	peerErrorHandler func(*ErrPeer)
+	peerSleepOnError time.Duration
 
 	messageIDPutListeners     map[string]chan<- *MessageReceived
 	messageIDPutListenersLock sync.RWMutex
 }
 
 type Config struct {
-	Peers            []Peer
+	PeerURLs         []string
 	Storage          Storage
 	SoulGen          func() string
 	PeerErrorHandler func(*ErrPeer)
+	PeerSleepOnError time.Duration
 }
 
-func New(config Config) *Gun {
+const DefaultPeerSleepOnError = 30 * time.Second
+
+func New(ctx context.Context, config Config) (*Gun, error) {
 	g := &Gun{
-		peers:                 make([]Peer, len(config.Peers)),
+		peers:                 make([]*gunPeer, len(config.PeerURLs)),
 		storage:               config.Storage,
 		soulGen:               config.SoulGen,
 		peerErrorHandler:      config.PeerErrorHandler,
+		peerSleepOnError:      config.PeerSleepOnError,
 		messageIDPutListeners: map[string]chan<- *MessageReceived{},
 	}
-	// Copy over peers
-	copy(g.peers, config.Peers)
+	// Create all the peers
+	sleepOnError := config.PeerSleepOnError
+	if sleepOnError == 0 {
+		sleepOnError = DefaultPeerSleepOnError
+	}
+	var err error
+	for i := 0; i < len(config.PeerURLs) && err == nil; i++ {
+		peerURL := config.PeerURLs[i]
+		connPeer := func() (Peer, error) { return NewPeer(ctx, peerURL) }
+		if g.peers[i], err = newGunPeer(connPeer, sleepOnError); err != nil {
+			err = fmt.Errorf("Failed connecting to peer %v: %v", peerURL, err)
+		}
+	}
+	// If there was an error, we need to close what we did create
+	if err != nil {
+		for _, peer := range g.peers {
+			if peer != nil {
+				peer.Close()
+			}
+		}
+		return nil, err
+	}
 	// Set defaults
 	if g.storage == nil {
 		g.storage = &StorageInMem{}
@@ -42,27 +68,7 @@ func New(config Config) *Gun {
 	}
 	// Start receiving
 	g.startReceiving()
-	return g
-}
-
-// To note: Fails on even one peer failure (otherwise, do this yourself). May connect to
-// some peers temporarily until first failure, but closes them all on failure
-func NewFromPeerURLs(ctx context.Context, peerURLs ...string) (g *Gun, err error) {
-	c := Config{Peers: make([]Peer, len(peerURLs))}
-	for i := 0; i < len(peerURLs) && err == nil; i++ {
-		if c.Peers[i], err = NewPeer(ctx, peerURLs[i]); err != nil {
-			err = fmt.Errorf("Failed connecting to peer %v: %v", peerURLs[i], err)
-		}
-	}
-	if err != nil {
-		for _, peer := range c.Peers {
-			if peer != nil {
-				peer.Close()
-			}
-		}
-		return
-	}
-	return New(c), nil
+	return g, nil
 }
 
 func (g *Gun) Close() error {
@@ -85,7 +91,7 @@ func (g *Gun) Send(ctx context.Context, msg *Message) <-chan *ErrPeer {
 	return g.send(ctx, msg, nil)
 }
 
-func (g *Gun) send(ctx context.Context, msg *Message, ignorePeer Peer) <-chan *ErrPeer {
+func (g *Gun) send(ctx context.Context, msg *Message, ignorePeer *gunPeer) <-chan *ErrPeer {
 	ch := make(chan *ErrPeer, len(g.peers))
 	// Everything async
 	go func() {
@@ -96,9 +102,10 @@ func (g *Gun) send(ctx context.Context, msg *Message, ignorePeer Peer) <-chan *E
 				continue
 			}
 			wg.Add(1)
-			go func(peer Peer) {
+			go func(peer *gunPeer) {
 				defer wg.Done()
-				if err := peer.Send(ctx, msg); err != nil {
+				// Just do nothing if the peer is bad and we couldn't send
+				if _, err := peer.send(ctx, msg); err != nil {
 					peerErr := &ErrPeer{err, peer}
 					go g.onPeerError(peerErr)
 					ch <- peerErr
@@ -112,24 +119,35 @@ func (g *Gun) send(ctx context.Context, msg *Message, ignorePeer Peer) <-chan *E
 
 func (g *Gun) startReceiving() {
 	for _, peer := range g.peers {
-		go func(peer Peer) {
-			for msgOrErr := range peer.Receive() {
-				if msgOrErr.Err != nil {
-					go g.onPeerError(&ErrPeer{msgOrErr.Err, peer})
-					continue
-				}
-				// See if a listener is around to handle it instead of rebroadcasting
-				msg := &MessageReceived{Message: msgOrErr.Message, Peer: peer}
-				if msg.Ack != "" && len(msg.Put) > 0 {
-					g.messageIDPutListenersLock.RLock()
-					l := g.messageIDPutListeners[msg.Ack]
-					g.messageIDPutListenersLock.RUnlock()
-					if l != nil {
-						go safeReceivedMessageSend(l, msg)
-						continue
+		go func(peer *gunPeer) {
+			// TDO: some kind of overall context is probably needed
+			ctx, cancelFn := context.WithCancel(context.TODO())
+			defer cancelFn()
+			for {
+				// We might not be able receive because peer is sleeping from
+				// an error happened within or a just-before send error.
+				if ok, msgs, err := peer.receive(ctx); !ok {
+					if err != nil {
+						go g.onPeerError(&ErrPeer{err, peer})
+					}
+					// Always sleep at least the err duration
+					time.Sleep(g.peerSleepOnError)
+				} else {
+					// Go over each message and see if it needs delivering or rebroadcasting
+					for _, msg := range msgs {
+						rMsg := &MessageReceived{Message: msg, peer: peer}
+						if msg.Ack != "" && len(msg.Put) > 0 {
+							g.messageIDPutListenersLock.RLock()
+							l := g.messageIDPutListeners[msg.Ack]
+							g.messageIDPutListenersLock.RUnlock()
+							if l != nil {
+								go safeReceivedMessageSend(l, rMsg)
+								continue
+							}
+						}
+						go g.onUnhandledMessage(rMsg)
 					}
 				}
-				go g.onUnhandledMessage(msg)
 			}
 		}(peer)
 	}
@@ -138,7 +156,7 @@ func (g *Gun) startReceiving() {
 func (g *Gun) onUnhandledMessage(msg *MessageReceived) {
 	// Unhandled message means rebroadcast
 	// TODO: we need a timeout or global context here...
-	g.send(context.TODO(), msg.Message, msg.Peer)
+	g.send(context.TODO(), msg.Message, msg.peer)
 }
 
 func (g *Gun) onPeerError(err *ErrPeer) {

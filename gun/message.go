@@ -19,5 +19,5 @@ type MessageGetRequest struct {
 
 type MessageReceived struct {
 	*Message
-	Peer Peer
+	peer *gunPeer
 }

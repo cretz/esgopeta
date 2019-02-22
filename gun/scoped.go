@@ -39,7 +39,7 @@ type ValueFetch struct {
 	// Nil if the value doesn't exist or there's an error
 	Value *ValueWithState
 	// Nil when local and sometimes on error
-	Peer Peer
+	peer *gunPeer
 }
 
 var ErrNotObject = errors.New("Scoped value not an object")
@@ -159,7 +159,7 @@ func (s *Scoped) onRemote(ctx context.Context, ch chan *ValueFetch) {
 				if !ok {
 					return
 				}
-				f := &ValueFetch{Field: s.field, Peer: msg.Peer}
+				f := &ValueFetch{Field: s.field, peer: msg.peer}
 				// We asked for a single field, should only get that field or it doesn't exist
 				if n := msg.Put[parentSoul]; n != nil && n.Values[s.field] != nil {
 					f.Value = &ValueWithState{n.Values[s.field], n.State[s.field]}
@@ -177,7 +177,7 @@ func (s *Scoped) onRemote(ctx context.Context, ch chan *ValueFetch) {
 			safeValueFetchSend(ch, &ValueFetch{
 				Err:   peerErr.Err,
 				Field: s.field,
-				Peer:  peerErr.Peer,
+				peer:  peerErr.peer,
 			})
 		}
 	}()
