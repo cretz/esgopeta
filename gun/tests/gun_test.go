@@ -1,11 +1,6 @@
 package tests
 
-import (
-	"testing"
-
-	"github.com/cretz/esgopeta/gun"
-)
-
+/*
 func TestGunGo(t *testing.T) {
 	// Run the server, put in one call, get in another, then check
 	ctx, cancelFn := newContext(t)
@@ -46,3 +41,4 @@ func TestGunGo(t *testing.T) {
 	ctx.Require.NoError(f.Err)
 
 }
+*/

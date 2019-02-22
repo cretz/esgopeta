@@ -7,18 +7,20 @@ import (
 )
 
 type Gun struct {
-	peers   []Peer
-	storage Storage
-	soulGen func() string
+	peers            []Peer
+	storage          Storage
+	soulGen          func() string
+	peerErrorHandler func(*ErrPeer)
 
-	messageIDPutListeners     map[string]chan<- *ReceivedMessage
+	messageIDPutListeners     map[string]chan<- *MessageReceived
 	messageIDPutListenersLock sync.RWMutex
 }
 
 type Config struct {
-	Peers   []Peer
-	Storage Storage
-	SoulGen func() string
+	Peers            []Peer
+	Storage          Storage
+	SoulGen          func() string
+	PeerErrorHandler func(*ErrPeer)
 }
 
 func New(config Config) *Gun {
@@ -26,7 +28,8 @@ func New(config Config) *Gun {
 		peers:                 make([]Peer, len(config.Peers)),
 		storage:               config.Storage,
 		soulGen:               config.SoulGen,
-		messageIDPutListeners: map[string]chan<- *ReceivedMessage{},
+		peerErrorHandler:      config.PeerErrorHandler,
+		messageIDPutListeners: map[string]chan<- *MessageReceived{},
 	}
 	// Copy over peers
 	copy(g.peers, config.Peers)
@@ -62,45 +65,43 @@ func NewFromPeerURLs(ctx context.Context, peerURLs ...string) (g *Gun, err error
 	return New(c), nil
 }
 
-type Message struct {
-	Ack    string             `json:"@,omitEmpty"`
-	ID     string             `json:"#,omitEmpty"`
-	Sender string             `json:"><,omitEmpty"`
-	Hash   string             `json:"##,omitempty"`
-	How    string             `json:"how,omitempty"`
-	Get    *MessageGetRequest `json:"get,omitempty"`
-	Put    map[string]*Node   `json:"put,omitempty"`
-	DAM    string             `json:"dam,omitempty"`
-	PID    string             `json:"pid,omitempty"`
+func (g *Gun) Close() error {
+	var errs []error
+	for _, p := range g.peers {
+		if err := p.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	} else if len(errs) == 1 {
+		return errs[0]
+	} else {
+		return fmt.Errorf("Multiple errors: %v", errs)
+	}
 }
 
-type MessageGetRequest struct {
-	ID    string `json:"#,omitempty"`
-	Field string `json:".,omitempty"`
+func (g *Gun) Send(ctx context.Context, msg *Message) <-chan *ErrPeer {
+	return g.send(ctx, msg, nil)
 }
 
-type ReceivedMessage struct {
-	*Message
-	Peer Peer
-}
-
-type PeerError struct {
-	Err  error
-	Peer Peer
-}
-
-func (g *Gun) Send(ctx context.Context, msg *Message) <-chan *PeerError {
-	ch := make(chan *PeerError, len(g.peers))
+func (g *Gun) send(ctx context.Context, msg *Message, ignorePeer Peer) <-chan *ErrPeer {
+	ch := make(chan *ErrPeer, len(g.peers))
 	// Everything async
 	go func() {
 		defer close(ch)
 		var wg sync.WaitGroup
 		for _, peer := range g.peers {
+			if peer == ignorePeer {
+				continue
+			}
 			wg.Add(1)
 			go func(peer Peer) {
 				defer wg.Done()
 				if err := peer.Send(ctx, msg); err != nil {
-					ch <- &PeerError{err, peer}
+					peerErr := &ErrPeer{err, peer}
+					go g.onPeerError(peerErr)
+					ch <- peerErr
 				}
 			}(peer)
 		}
@@ -113,37 +114,40 @@ func (g *Gun) startReceiving() {
 	for _, peer := range g.peers {
 		go func(peer Peer) {
 			for msgOrErr := range peer.Receive() {
-				// TODO: what to do with error?
 				if msgOrErr.Err != nil {
-					g.onPeerReceiveError(&PeerError{msgOrErr.Err, peer})
+					go g.onPeerError(&ErrPeer{msgOrErr.Err, peer})
 					continue
 				}
 				// See if a listener is around to handle it instead of rebroadcasting
-				msg := &ReceivedMessage{Message: msgOrErr.Message, Peer: peer}
+				msg := &MessageReceived{Message: msgOrErr.Message, Peer: peer}
 				if msg.Ack != "" && len(msg.Put) > 0 {
 					g.messageIDPutListenersLock.RLock()
 					l := g.messageIDPutListeners[msg.Ack]
 					g.messageIDPutListenersLock.RUnlock()
 					if l != nil {
-						safeReceivedMessageSend(l, msg)
+						go safeReceivedMessageSend(l, msg)
 						continue
 					}
 				}
-				g.onUnhandledMessage(msg)
+				go g.onUnhandledMessage(msg)
 			}
 		}(peer)
 	}
 }
 
-func (g *Gun) onUnhandledMessage(msg *ReceivedMessage) {
-
+func (g *Gun) onUnhandledMessage(msg *MessageReceived) {
+	// Unhandled message means rebroadcast
+	// TODO: we need a timeout or global context here...
+	g.send(context.TODO(), msg.Message, msg.Peer)
 }
 
-func (g *Gun) onPeerReceiveError(err *PeerError) {
-
+func (g *Gun) onPeerError(err *ErrPeer) {
+	if g.peerErrorHandler != nil {
+		g.peerErrorHandler(err)
+	}
 }
 
-func (g *Gun) RegisterMessageIDPutListener(id string, ch chan<- *ReceivedMessage) {
+func (g *Gun) RegisterMessageIDPutListener(id string, ch chan<- *MessageReceived) {
 	g.messageIDPutListenersLock.Lock()
 	defer g.messageIDPutListenersLock.Unlock()
 	g.messageIDPutListeners[id] = ch
@@ -160,14 +164,14 @@ func (g *Gun) UnregisterMessageIDPutListener(id string) {
 // }
 
 func (g *Gun) Scoped(ctx context.Context, key string, children ...string) *Scoped {
-	s := newScoped(g, "", key)
+	s := newScoped(g, nil, key)
 	if len(children) > 0 {
 		s = s.Scoped(ctx, children[0], children[1:]...)
 	}
 	return s
 }
 
-func safeReceivedMessageSend(ch chan<- *ReceivedMessage, msg *ReceivedMessage) {
+func safeReceivedMessageSend(ch chan<- *MessageReceived, msg *MessageReceived) {
 	// Due to the fact that we may send on a closed channel here, we ignore the panic
 	defer func() { recover() }()
 	ch <- msg

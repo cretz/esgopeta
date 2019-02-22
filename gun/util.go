@@ -1,6 +1,8 @@
 package gun
 
-import "crypto/rand"
+import (
+	"crypto/rand"
+)
 
 const randChars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 

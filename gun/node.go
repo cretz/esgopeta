@@ -17,14 +17,14 @@ var SoulGenDefault = func() string {
 }
 
 type Node struct {
-	NodeMetadata
+	Metadata
 	Values map[string]Value
 }
 
 func (n *Node) MarshalJSON() ([]byte, error) {
 	// Just put it all in a map and then encode it
 	toEnc := make(map[string]interface{}, len(n.Values)+1)
-	toEnc["_"] = &n.NodeMetadata
+	toEnc["_"] = &n.Metadata
 	for k, v := range n.Values {
 		toEnc[k] = v
 	}
@@ -49,7 +49,7 @@ func (n *Node) UnmarshalJSON(b []byte) error {
 		} else if keyStr, ok := key.(string); !ok {
 			return fmt.Errorf("Unrecognized token %v", key)
 		} else if keyStr == "_" {
-			if err = dec.Decode(&n.NodeMetadata); err != nil {
+			if err = dec.Decode(&n.Metadata); err != nil {
 				return fmt.Errorf("Failed unmarshaling metadata: %v", err)
 			}
 		} else if val, err := dec.Token(); err != nil {
@@ -60,8 +60,8 @@ func (n *Node) UnmarshalJSON(b []byte) error {
 	}
 }
 
-type NodeMetadata struct {
-	ID    string           `json:"#"`
+type Metadata struct {
+	Soul  string           `json:"#"`
 	State map[string]int64 `json:">"`
 }
 
@@ -110,7 +110,8 @@ func (n ValueRelation) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]string{"#": string(n)})
 }
 
-type StatefulValue struct {
+type ValueWithState struct {
 	Value Value
+	// This is 0 for top-level values
 	State int64
 }

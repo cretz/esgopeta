@@ -8,6 +8,13 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+type ErrPeer struct {
+	Err  error
+	Peer Peer
+}
+
+func (e *ErrPeer) Error() string { return fmt.Sprintf("Error on peer %v: %v", e.Peer, e.Err) }
+
 type Peer interface {
 	Send(ctx context.Context, msg *Message) error
 	Receive() <-chan *MessageOrError

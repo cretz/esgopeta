@@ -2,13 +2,17 @@ package gun
 
 import (
 	"context"
+	"errors"
 	"sync"
 )
 
 type Scoped struct {
-	gun      *Gun
-	parentID string
-	field    string
+	gun *Gun
+
+	parent               *Scoped
+	field                string
+	cachedParentSoul     string
+	cachedParentSoulLock sync.RWMutex
 
 	valueChansToListeners     map[<-chan *ValueFetch]*messageIDListener
 	valueChansToListenersLock sync.Mutex
@@ -17,14 +21,14 @@ type Scoped struct {
 type messageIDListener struct {
 	id               string
 	values           chan *ValueFetch
-	receivedMessages chan *ReceivedMessage
+	receivedMessages chan *MessageReceived
 }
 
-func newScoped(gun *Gun, parentID string, field string) *Scoped {
+func newScoped(gun *Gun, parent *Scoped, field string) *Scoped {
 	return &Scoped{
-		gun:      gun,
-		parentID: parentID,
-		field:    field,
+		gun:    gun,
+		parent: parent,
+		field:  field,
 	}
 }
 
@@ -32,16 +36,34 @@ type ValueFetch struct {
 	// This can be a context error on cancelation
 	Err   error
 	Field string
-	// Nil if there is an error
-	Value *StatefulValue
+	// Nil if the value doesn't exist or there's an error
+	Value *ValueWithState
 	// Nil when local and sometimes on error
 	Peer Peer
 }
 
-type Ack struct {
-	Err  error
-	Ok   bool
-	Peer Peer
+var ErrNotObject = errors.New("Scoped value not an object")
+var ErrLookupOnTopLevel = errors.New("Cannot do lookup on top level")
+
+// Empty string if doesn't exist, ErrNotObject if self or parent not an object
+func (s *Scoped) Soul(ctx context.Context) (string, error) {
+	s.cachedParentSoulLock.RLock()
+	cachedParentSoul := s.cachedParentSoul
+	s.cachedParentSoulLock.RUnlock()
+	if cachedParentSoul != "" {
+		return cachedParentSoul, nil
+	} else if v := s.Val(ctx); v.Err != nil {
+		return "", v.Err
+	} else if v.Value == nil {
+		return "", nil
+	} else if rel, ok := v.Value.Value.(ValueRelation); !ok {
+		return "", ErrNotObject
+	} else {
+		s.cachedParentSoulLock.Lock()
+		s.cachedParentSoul = string(rel)
+		s.cachedParentSoulLock.Unlock()
+		return string(rel), nil
+	}
 }
 
 func (s *Scoped) Val(ctx context.Context) *ValueFetch {
@@ -53,14 +75,25 @@ func (s *Scoped) Val(ctx context.Context) *ValueFetch {
 }
 
 func (s *Scoped) ValLocal(ctx context.Context) *ValueFetch {
-	var v ValueFetch
-	if v.Value, v.Err = s.gun.storage.Get(ctx, s.parentID, s.field); v.Err == ErrStorageNotFound {
-		return nil
+	// If there is no parent, this is just the relation
+	if s.parent == nil {
+		return &ValueFetch{Field: s.field, Value: &ValueWithState{Value: ValueRelation(s.field)}}
 	}
-	return &v
+	v := &ValueFetch{Field: s.field}
+	// Need parent soul for lookup
+	var parentSoul string
+	if parentSoul, v.Err = s.parent.Soul(ctx); v.Err == nil {
+		if v.Value, v.Err = s.gun.storage.Get(ctx, parentSoul, s.field); v.Err == ErrStorageNotFound {
+			return nil
+		}
+	}
+	return v
 }
 
 func (s *Scoped) ValRemote(ctx context.Context) *ValueFetch {
+	if s.parent == nil {
+		return &ValueFetch{Err: ErrLookupOnTopLevel, Field: s.field}
+	}
 	ch := s.OnRemote(ctx)
 	defer s.Off(ch)
 	return <-ch
@@ -68,29 +101,46 @@ func (s *Scoped) ValRemote(ctx context.Context) *ValueFetch {
 
 func (s *Scoped) On(ctx context.Context) <-chan *ValueFetch {
 	ch := make(chan *ValueFetch, 1)
-	if v := s.ValLocal(ctx); v != nil {
-		ch <- v
+	if s.parent == nil {
+		ch <- &ValueFetch{Err: ErrLookupOnTopLevel, Field: s.field}
+	} else {
+		if v := s.ValLocal(ctx); v != nil {
+			ch <- v
+		}
+		go s.onRemote(ctx, ch)
 	}
-	go s.onRemote(ctx, ch)
 	return ch
 }
 
 func (s *Scoped) OnRemote(ctx context.Context) <-chan *ValueFetch {
 	ch := make(chan *ValueFetch, 1)
-	go s.onRemote(ctx, ch)
+	if s.parent == nil {
+		ch <- &ValueFetch{Err: ErrLookupOnTopLevel, Field: s.field}
+	} else {
+		go s.onRemote(ctx, ch)
+	}
 	return ch
 }
 
 func (s *Scoped) onRemote(ctx context.Context, ch chan *ValueFetch) {
+	if s.parent == nil {
+		panic("No parent")
+	}
+	// We have to get the parent soul first
+	parentSoul, err := s.parent.Soul(ctx)
+	if err != nil {
+		ch <- &ValueFetch{Err: ErrLookupOnTopLevel, Field: s.field}
+		return
+	}
 	// Create get request
 	req := &Message{
 		ID:  randString(9),
-		Get: &MessageGetRequest{ID: s.parentID, Field: s.field},
+		Get: &MessageGetRequest{Soul: parentSoul, Field: s.field},
 	}
 	// Make a chan to listen for received messages and link it to
 	// the given one so we can turn it "off". Off will close this
 	// chan.
-	msgCh := make(chan *ReceivedMessage)
+	msgCh := make(chan *MessageReceived)
 	s.valueChansToListenersLock.Lock()
 	s.valueChansToListeners[ch] = &messageIDListener{req.ID, ch, msgCh}
 	s.valueChansToListenersLock.Unlock()
@@ -109,17 +159,15 @@ func (s *Scoped) onRemote(ctx context.Context, ch chan *ValueFetch) {
 				if !ok {
 					return
 				}
-				// We asked for a single field, should only get that field
-				if n := msg.Put[s.parentID]; n != nil && n.Values[s.field] != nil {
-					// TODO: conflict resolution
-					// TODO: dedupe
-					// TODO: store and cache
-					safeValueFetchSend(ch, &ValueFetch{
-						Field: s.field,
-						Value: &StatefulValue{n.Values[s.field], n.State[s.field]},
-						Peer:  msg.Peer,
-					})
+				f := &ValueFetch{Field: s.field, Peer: msg.Peer}
+				// We asked for a single field, should only get that field or it doesn't exist
+				if n := msg.Put[parentSoul]; n != nil && n.Values[s.field] != nil {
+					f.Value = &ValueWithState{n.Values[s.field], n.State[s.field]}
 				}
+				// TODO: conflict resolution and defer
+				// TODO: dedupe
+				// TODO: store and cache
+				safeValueFetchSend(ch, f)
 			}
 		}
 	}()
@@ -151,7 +199,11 @@ func (s *Scoped) Off(ch <-chan *ValueFetch) bool {
 }
 
 func (s *Scoped) Scoped(ctx context.Context, key string, children ...string) *Scoped {
-	panic("TODO")
+	ret := newScoped(s.gun, s, key)
+	for _, child := range children {
+		ret = newScoped(s.gun, ret, child)
+	}
+	return ret
 }
 
 func safeValueFetchSend(ch chan<- *ValueFetch, f *ValueFetch) {
