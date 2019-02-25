@@ -8,7 +8,7 @@ import (
 )
 
 type Gun struct {
-	peers            []*gunPeer
+	peers            []*Peer
 	storage          Storage
 	soulGen          func() string
 	peerErrorHandler func(*ErrPeer)
@@ -42,7 +42,7 @@ const DefaultPeerSleepOnError = 30 * time.Second
 
 func New(ctx context.Context, config Config) (*Gun, error) {
 	g := &Gun{
-		peers:              make([]*gunPeer, len(config.PeerURLs)),
+		peers:              make([]*Peer, len(config.PeerURLs)),
 		storage:            config.Storage,
 		soulGen:            config.SoulGen,
 		peerErrorHandler:   config.PeerErrorHandler,
@@ -59,8 +59,8 @@ func New(ctx context.Context, config Config) (*Gun, error) {
 	var err error
 	for i := 0; i < len(config.PeerURLs) && err == nil; i++ {
 		peerURL := config.PeerURLs[i]
-		connPeer := func() (Peer, error) { return NewPeer(ctx, peerURL) }
-		if g.peers[i], err = newGunPeer(peerURL, connPeer, sleepOnError); err != nil {
+		newConn := func() (PeerConn, error) { return NewPeerConn(ctx, peerURL) }
+		if g.peers[i], err = newPeer(peerURL, newConn, sleepOnError); err != nil {
 			err = fmt.Errorf("Failed connecting to peer %v: %v", peerURL, err)
 		}
 	}
@@ -88,6 +88,14 @@ func New(ctx context.Context, config Config) (*Gun, error) {
 	return g, nil
 }
 
+func (g *Gun) Scoped(ctx context.Context, key string, children ...string) *Scoped {
+	s := newScoped(g, nil, key)
+	if len(children) > 0 {
+		s = s.Scoped(ctx, children[0], children[1:]...)
+	}
+	return s
+}
+
 func (g *Gun) Close() error {
 	var errs []error
 	for _, p := range g.peers {
@@ -104,11 +112,7 @@ func (g *Gun) Close() error {
 	}
 }
 
-func (g *Gun) Send(ctx context.Context, msg *Message) <-chan *ErrPeer {
-	return g.send(ctx, msg, nil)
-}
-
-func (g *Gun) send(ctx context.Context, msg *Message, ignorePeer *gunPeer) <-chan *ErrPeer {
+func (g *Gun) send(ctx context.Context, msg *Message, ignorePeer *Peer) <-chan *ErrPeer {
 	ch := make(chan *ErrPeer, len(g.peers))
 	// Everything async
 	go func() {
@@ -119,7 +123,7 @@ func (g *Gun) send(ctx context.Context, msg *Message, ignorePeer *gunPeer) <-cha
 				continue
 			}
 			wg.Add(1)
-			go func(peer *gunPeer) {
+			go func(peer *Peer) {
 				defer wg.Done()
 				// Just do nothing if the peer is bad and we couldn't send
 				if _, err := peer.send(ctx, msg); err != nil {
@@ -136,11 +140,11 @@ func (g *Gun) send(ctx context.Context, msg *Message, ignorePeer *gunPeer) <-cha
 
 func (g *Gun) startReceiving() {
 	for _, peer := range g.peers {
-		go func(peer *gunPeer) {
+		go func(peer *Peer) {
 			// TDO: some kind of overall context is probably needed
 			ctx, cancelFn := context.WithCancel(context.TODO())
 			defer cancelFn()
-			for !peer.closed() {
+			for !peer.Closed() {
 				// We might not be able receive because peer is sleeping from
 				// an error happened within or a just-before send error.
 				if ok, msgs, err := peer.receive(ctx); !ok {
@@ -152,7 +156,7 @@ func (g *Gun) startReceiving() {
 				} else {
 					// Go over each message and see if it needs delivering or rebroadcasting
 					for _, msg := range msgs {
-						g.onPeerMessage(ctx, &MessageReceived{Message: msg, peer: peer})
+						g.onPeerMessage(ctx, &MessageReceived{Message: msg, Peer: peer})
 					}
 				}
 			}
@@ -176,17 +180,17 @@ func (g *Gun) onPeerMessage(ctx context.Context, msg *MessageReceived) {
 		if msg.PID == "" {
 			// This is a request, set the PID and send it back
 			msg.PID = g.myPeerID
-			if _, err := msg.peer.send(ctx, msg.Message); err != nil {
-				go g.onPeerError(&ErrPeer{err, msg.peer})
+			if _, err := msg.Peer.send(ctx, msg.Message); err != nil {
+				go g.onPeerError(&ErrPeer{err, msg.Peer})
 			}
 		} else {
 			// This is them telling us theirs
-			msg.peer.id = msg.PID
+			msg.Peer.id = msg.PID
 		}
 		return
 	}
 	// Unhandled message means rebroadcast
-	g.send(ctx, msg.Message, msg.peer)
+	g.send(ctx, msg.Message, msg.Peer)
 }
 
 func (g *Gun) onPeerError(err *ErrPeer) {
@@ -195,24 +199,16 @@ func (g *Gun) onPeerError(err *ErrPeer) {
 	}
 }
 
-func (g *Gun) RegisterMessageIDListener(id string, ch chan<- *MessageReceived) {
+func (g *Gun) registerMessageIDListener(id string, ch chan<- *MessageReceived) {
 	g.messageIDListenersLock.Lock()
 	defer g.messageIDListenersLock.Unlock()
 	g.messageIDListeners[id] = ch
 }
 
-func (g *Gun) UnregisterMessageIDListener(id string) {
+func (g *Gun) unregisterMessageIDListener(id string) {
 	g.messageIDListenersLock.Lock()
 	defer g.messageIDListenersLock.Unlock()
 	delete(g.messageIDListeners, id)
-}
-
-func (g *Gun) Scoped(ctx context.Context, key string, children ...string) *Scoped {
-	s := newScoped(g, nil, key)
-	if len(children) > 0 {
-		s = s.Scoped(ctx, children[0], children[1:]...)
-	}
-	return s
 }
 
 func safeReceivedMessageSend(ch chan<- *MessageReceived, msg *MessageReceived) {

@@ -5,30 +5,34 @@ import (
 	"time"
 )
 
-// TimeFromUnixMs returns zero'd time if ms is 0
-func TimeFromUnixMs(ms int64) time.Time {
+type State uint64
+
+func StateNow() State { return State(timeNowUnixMs()) }
+
+// timeFromUnixMs returns zero'd time if ms is 0
+func timeFromUnixMs(ms int64) time.Time {
 	if ms == 0 {
 		return time.Time{}
 	}
 	return time.Unix(0, ms*int64(time.Millisecond))
 }
 
-// TimeToUnixMs returns 0 if t.IsZero
-func TimeToUnixMs(t time.Time) int64 {
+// timeToUnixMs returns 0 if t.IsZero
+func timeToUnixMs(t time.Time) int64 {
 	if t.IsZero() {
 		return 0
 	}
 	return t.UnixNano() / int64(time.Millisecond)
 }
 
-func TimeNowUnixMs() int64 {
-	return TimeToUnixMs(time.Now())
+func timeNowUnixMs() int64 {
+	return timeToUnixMs(time.Now())
 }
 
 var lastNano int64
 
 // uniqueNano is 0 if ms is first time seen, otherwise a unique num in combination with ms
-func TimeNowUniqueUnix() (ms int64, uniqueNum int64) {
+func timeNowUniqueUnix() (ms int64, uniqueNum int64) {
 	now := time.Now()
 	newNano := now.UnixNano()
 	for {

@@ -13,9 +13,8 @@ func TestSimpleJS(t *testing.T) {
 
 func TestGunJS(t *testing.T) {
 	// Run the server, put in one call, get in another, then check
-	ctx, cancelFn := newContext(t)
+	ctx, cancelFn := newContextWithGunJServer(t)
 	defer cancelFn()
-	ctx.startGunJSServer()
 	randStr := randString(30)
 	ctx.runJSWithGun(`
 		gun.get('esgopeta-test').get('TestGunJS').get('some-key').put('` + randStr + `', ack => {

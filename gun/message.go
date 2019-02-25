@@ -16,12 +16,6 @@ type Message struct {
 	Err  string             `json:"err,omitempty"`
 }
 
-func (m *Message) Clone() *Message {
-	msg := &Message{}
-	*msg = *m
-	return msg
-}
-
 type MessageGetRequest struct {
 	Soul  string `json:"#,omitempty"`
 	Field string `json:".,omitempty"`
@@ -29,5 +23,5 @@ type MessageGetRequest struct {
 
 type MessageReceived struct {
 	*Message
-	peer *gunPeer
+	Peer *Peer
 }

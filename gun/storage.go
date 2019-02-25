@@ -9,9 +9,9 @@ import (
 var ErrStorageNotFound = errors.New("Not found")
 
 type Storage interface {
-	Get(ctx context.Context, parentSoul, field string) (*ValueWithState, error)
+	Get(ctx context.Context, parentSoul, field string) (Value, State, error)
 	// If bool is false, it's deferred
-	Put(ctx context.Context, parentSoul, field string, val *ValueWithState) (bool, error)
+	Put(ctx context.Context, parentSoul, field string, val Value, state State) (bool, error)
 	Tracking(ctx context.Context, parentSoul, field string) (bool, error)
 }
 
@@ -21,16 +21,22 @@ type StorageInMem struct {
 
 type parentSoulAndField struct{ parentSoul, field string }
 
-func (s *StorageInMem) Get(ctx context.Context, parentSoul, field string) (*ValueWithState, error) {
-	v, ok := s.values.Load(parentSoulAndField{parentSoul, field})
-	if !ok {
-		return nil, ErrStorageNotFound
-	}
-	return v.(*ValueWithState), nil
+type valueWithState struct {
+	val   Value
+	state State
 }
 
-func (s *StorageInMem) Put(ctx context.Context, parentSoul, field string, val *ValueWithState) (bool, error) {
-	s.values.Store(parentSoulAndField{parentSoul, field}, val)
+func (s *StorageInMem) Get(ctx context.Context, parentSoul, field string) (Value, State, error) {
+	v, ok := s.values.Load(parentSoulAndField{parentSoul, field})
+	if !ok {
+		return nil, 0, ErrStorageNotFound
+	}
+	vs := v.(*valueWithState)
+	return vs.val, vs.state, nil
+}
+
+func (s *StorageInMem) Put(ctx context.Context, parentSoul, field string, val Value, state State) (bool, error) {
+	s.values.Store(parentSoulAndField{parentSoul, field}, &valueWithState{val, state})
 	// TODO: conflict resolution state check?
 	return true, nil
 }

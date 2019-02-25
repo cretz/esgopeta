@@ -6,41 +6,160 @@ import (
 	"fmt"
 	"net/url"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 type ErrPeer struct {
 	Err  error
-	peer *gunPeer
+	Peer *Peer
 }
 
-func (e *ErrPeer) Error() string { return fmt.Sprintf("Error on peer %v: %v", e.peer, e.Err) }
+func (e *ErrPeer) Error() string { return fmt.Sprintf("Error on peer %v: %v", e.Peer, e.Err) }
 
-type Peer interface {
+type Peer struct {
+	url        string
+	newConn    func() (PeerConn, error)
+	sleepOnErr time.Duration // TODO: would be better as backoff
+	id         string
+
+	connCurrent PeerConn
+	connBad     bool // If true, don't try anything
+	connLock    sync.Mutex
+}
+
+func newPeer(url string, newConn func() (PeerConn, error), sleepOnErr time.Duration) (*Peer, error) {
+	p := &Peer{url: url, newConn: newConn, sleepOnErr: sleepOnErr}
+	var err error
+	if p.connCurrent, err = newConn(); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (p *Peer) ID() string { return p.id }
+
+func (p *Peer) String() string {
+	id := ""
+	if p.id != "" {
+		id = "(id: " + p.id + ")"
+	}
+	connStatus := "connected"
+	if p.Conn() == nil {
+		connStatus = "disconnected"
+	}
+	return fmt.Sprintf("Peer%v %v (%v)", id, p.url, connStatus)
+}
+
+func (p *Peer) reconnect() (err error) {
+	p.connLock.Lock()
+	defer p.connLock.Unlock()
+	if p.connCurrent == nil && p.connBad {
+		p.connBad = false
+		if p.connCurrent, err = p.newConn(); err != nil {
+			p.connBad = true
+			time.AfterFunc(p.sleepOnErr, func() { p.reconnect() })
+		}
+	}
+	return
+}
+
+// Can be nil peer if currently bad or closed
+func (p *Peer) Conn() PeerConn {
+	p.connLock.Lock()
+	defer p.connLock.Unlock()
+	return p.connCurrent
+}
+
+func (p *Peer) markConnErrored(conn PeerConn) {
+	p.connLock.Lock()
+	defer p.connLock.Unlock()
+	if conn == p.connCurrent {
+		p.connCurrent = nil
+		p.connBad = true
+		conn.Close()
+		time.AfterFunc(p.sleepOnErr, func() { p.reconnect() })
+	}
+}
+
+func (p *Peer) send(ctx context.Context, msg *Message, moreMsgs ...*Message) (ok bool, err error) {
+	conn := p.Conn()
+	if conn == nil {
+		return false, nil
+	}
+	// Clone them with peer "to"
+	updatedMsg := &Message{}
+	*updatedMsg = *msg
+	updatedMsg.To = p.url
+	updatedMoreMsgs := make([]*Message, len(moreMsgs))
+	for i, moreMsg := range moreMsgs {
+		updatedMoreMsg := &Message{}
+		*updatedMoreMsg = *moreMsg
+		updatedMoreMsg.To = p.url
+		updatedMoreMsgs[i] = updatedMoreMsg
+	}
+	if err = conn.Send(ctx, updatedMsg, updatedMoreMsgs...); err != nil {
+		p.markConnErrored(conn)
+		return false, err
+	} else {
+		return true, nil
+	}
+}
+
+func (p *Peer) receive(ctx context.Context) (ok bool, msgs []*Message, err error) {
+	if conn := p.Conn(); conn == nil {
+		return false, nil, nil
+	} else if msgs, err = conn.Receive(ctx); err != nil {
+		p.markConnErrored(conn)
+		return false, nil, err
+	} else {
+		return true, msgs, nil
+	}
+}
+
+func (p *Peer) Close() error {
+	p.connLock.Lock()
+	defer p.connLock.Unlock()
+	var err error
+	if p.connCurrent != nil {
+		err = p.connCurrent.Close()
+		p.connCurrent = nil
+	}
+	p.connBad = false
+	return err
+}
+
+func (p *Peer) Closed() bool {
+	p.connLock.Lock()
+	defer p.connLock.Unlock()
+	return p.connCurrent == nil && !p.connBad
+}
+
+type PeerConn interface {
 	Send(ctx context.Context, msg *Message, moreMsgs ...*Message) error
 	// Chan is closed on first err, when context is closed, or when peer is closed
 	Receive(ctx context.Context) ([]*Message, error)
 	Close() error
 }
 
-var PeerURLSchemes map[string]func(context.Context, *url.URL) (Peer, error)
+var PeerURLSchemes map[string]func(context.Context, *url.URL) (PeerConn, error)
 
 func init() {
-	PeerURLSchemes = map[string]func(context.Context, *url.URL) (Peer, error){
-		"http": func(ctx context.Context, peerURL *url.URL) (Peer, error) {
+	PeerURLSchemes = map[string]func(context.Context, *url.URL) (PeerConn, error){
+		"http": func(ctx context.Context, peerURL *url.URL) (PeerConn, error) {
 			schemeChangedURL := &url.URL{}
 			*schemeChangedURL = *peerURL
 			schemeChangedURL.Scheme = "ws"
-			return NewPeerWebSocket(ctx, schemeChangedURL)
+			return NewPeerConnWebSocket(ctx, schemeChangedURL)
 		},
-		"ws": func(ctx context.Context, peerURL *url.URL) (Peer, error) {
-			return NewPeerWebSocket(ctx, peerURL)
+		"ws": func(ctx context.Context, peerURL *url.URL) (PeerConn, error) {
+			return NewPeerConnWebSocket(ctx, peerURL)
 		},
 	}
 }
 
-func NewPeer(ctx context.Context, peerURL string) (Peer, error) {
+func NewPeerConn(ctx context.Context, peerURL string) (PeerConn, error) {
 	if parsedURL, err := url.Parse(peerURL); err != nil {
 		return nil, err
 	} else if peerNew := PeerURLSchemes[parsedURL.Scheme]; peerNew == nil {
@@ -50,20 +169,20 @@ func NewPeer(ctx context.Context, peerURL string) (Peer, error) {
 	}
 }
 
-type PeerWebSocket struct {
+type PeerConnWebSocket struct {
 	Underlying *websocket.Conn
 	WriteLock  sync.Mutex
 }
 
-func NewPeerWebSocket(ctx context.Context, peerUrl *url.URL) (*PeerWebSocket, error) {
+func NewPeerConnWebSocket(ctx context.Context, peerUrl *url.URL) (*PeerConnWebSocket, error) {
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, peerUrl.String(), nil)
 	if err != nil {
 		return nil, err
 	}
-	return &PeerWebSocket{Underlying: conn}, nil
+	return &PeerConnWebSocket{Underlying: conn}, nil
 }
 
-func (p *PeerWebSocket) Send(ctx context.Context, msg *Message, moreMsgs ...*Message) error {
+func (p *PeerConnWebSocket) Send(ctx context.Context, msg *Message, moreMsgs ...*Message) error {
 	// If there are more, send all as an array of JSON strings, otherwise just the msg
 	var toWrite interface{}
 	if len(moreMsgs) == 0 {
@@ -97,7 +216,7 @@ func (p *PeerWebSocket) Send(ctx context.Context, msg *Message, moreMsgs ...*Mes
 	}
 }
 
-func (p *PeerWebSocket) Receive(ctx context.Context) ([]*Message, error) {
+func (p *PeerConnWebSocket) Receive(ctx context.Context) ([]*Message, error) {
 	bytsCh := make(chan []byte, 1)
 	errCh := make(chan error, 1)
 	go func() {
@@ -135,6 +254,6 @@ func (p *PeerWebSocket) Receive(ctx context.Context) ([]*Message, error) {
 	}
 }
 
-func (p *PeerWebSocket) Close() error {
+func (p *PeerConnWebSocket) Close() error {
 	return p.Underlying.Close()
 }

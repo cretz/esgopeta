@@ -22,11 +22,10 @@ func (s *Scoped) FetchOneLocal(ctx context.Context) *FetchResult {
 	// Need parent soul for lookup
 	var parentSoul string
 	if parentSoul, r.Err = s.parent.Soul(ctx); r.Err == nil {
-		var vs *ValueWithState
-		if vs, r.Err = s.gun.storage.Get(ctx, parentSoul, s.field); r.Err == ErrStorageNotFound {
+		if r.Value, r.State, r.Err = s.gun.storage.Get(ctx, parentSoul, s.field); r.Err == ErrStorageNotFound {
 			r.Err = nil
 		} else if r.Err == nil {
-			r.Value, r.State, r.ValueExists = vs.Value, vs.State, true
+			r.ValueExists = true
 		}
 	}
 	return r
@@ -89,7 +88,7 @@ func (s *Scoped) fetchRemote(ctx context.Context, ch chan *FetchResult) {
 	s.fetchResultListeners[ch] = &fetchResultListener{req.ID, ch, msgCh}
 	s.fetchResultListenersLock.Unlock()
 	// Listen for responses to this get
-	s.gun.RegisterMessageIDListener(req.ID, msgCh)
+	s.gun.registerMessageIDListener(req.ID, msgCh)
 	// TODO: only for children: s.gun.RegisterValueIDListener(s.id, msgCh)
 	// Handle received messages turning them to value fetches
 	go func() {
@@ -103,7 +102,7 @@ func (s *Scoped) fetchRemote(ctx context.Context, ch chan *FetchResult) {
 				if !ok {
 					return
 				}
-				r := &FetchResult{Field: s.field, peer: msg.peer}
+				r := &FetchResult{Field: s.field, Peer: msg.Peer}
 				// We asked for a single field, should only get that field or it doesn't exist
 				if msg.Err != "" {
 					r.Err = fmt.Errorf("Remote error: %v", msg.Err)
@@ -119,11 +118,11 @@ func (s *Scoped) fetchRemote(ctx context.Context, ch chan *FetchResult) {
 	}()
 	// Send async, sending back errors
 	go func() {
-		for peerErr := range s.gun.Send(ctx, req) {
+		for peerErr := range s.gun.send(ctx, req, nil) {
 			safeFetchResultSend(ch, &FetchResult{
 				Err:   peerErr.Err,
 				Field: s.field,
-				peer:  peerErr.peer,
+				Peer:  peerErr.Peer,
 			})
 		}
 	}()
@@ -136,7 +135,7 @@ func (s *Scoped) FetchDone(ch <-chan *FetchResult) bool {
 	s.fetchResultListenersLock.Unlock()
 	if l != nil {
 		// Unregister the chan
-		s.gun.UnregisterMessageIDListener(l.id)
+		s.gun.unregisterMessageIDListener(l.id)
 		// Close the message chan and the result chan
 		close(l.receivedMessages)
 		close(l.results)
@@ -162,8 +161,8 @@ type FetchResult struct {
 	Field string
 	// Nil if the value doesn't exist, exists and is nil, or there's an error
 	Value       Value
-	State       int64 // This can be 0 for errors or top-level value relations
+	State       State // This can be 0 for errors or top-level value relations
 	ValueExists bool
 	// Nil when local and sometimes on error
-	peer *gunPeer
+	Peer *Peer
 }

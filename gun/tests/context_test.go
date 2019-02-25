@@ -26,6 +26,15 @@ func newContext(t *testing.T) (*testContext, context.CancelFunc) {
 	return withTestContext(context.Background(), t)
 }
 
+func newContextWithGunJServer(t *testing.T) (*testContext, context.CancelFunc) {
+	ctx, cancelFn := newContext(t)
+	serverCancelFn := ctx.startGunJSServer()
+	return ctx, func() {
+		serverCancelFn()
+		cancelFn()
+	}
+}
+
 const defaultGunJSPort = 8080
 
 func withTestContext(ctx context.Context, t *testing.T) (*testContext, context.CancelFunc) {
@@ -77,20 +86,26 @@ func (t *testContext) startJS(script string) (*bytes.Buffer, *exec.Cmd, context.
 	return &buf, cmd, cancelFn
 }
 
-func (t *testContext) startGunJSServer() {
+func (t *testContext) startGunJSServer() context.CancelFunc {
 	// If we're logging, use a proxy
 	port := t.GunJSPort
 	if testing.Verbose() {
 		t.startGunWebSocketProxyLogger(port, port+1)
 		port++
 	}
-	// Remove entire data folder first
+	// Remove entire data folder first just in case
 	t.Require.NoError(os.RemoveAll("radata-server"))
-	t.startJS(`
+	_, cmd, cancelFn := t.startJS(`
 		var Gun = require('gun')
 		const server = require('http').createServer().listen(` + strconv.Itoa(port) + `)
 		const gun = Gun({web: server, file: 'radata-server'})
 	`)
+	return func() {
+		cancelFn()
+		cmd.Wait()
+		// Remove the data folder at the end
+		os.RemoveAll("radata-server")
+	}
 }
 
 func (t *testContext) newGunConnectedToGunJS() *gun.Gun {

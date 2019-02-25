@@ -8,7 +8,7 @@ import (
 )
 
 func DefaultSoulGen() string {
-	ms, uniqueNum := TimeNowUniqueUnix()
+	ms, uniqueNum := timeNowUniqueUnix()
 	s := strconv.FormatInt(ms, 36)
 	if uniqueNum > 0 {
 		s += strconv.FormatInt(uniqueNum, 36)
@@ -54,7 +54,7 @@ func (n *Node) UnmarshalJSON(b []byte) error {
 			}
 		} else if val, err := dec.Token(); err != nil {
 			return err
-		} else if n.Values[keyStr], err = DecodeJSONValue(val, dec); err != nil {
+		} else if n.Values[keyStr], err = ValueDecodeJSON(val, dec); err != nil {
 			return err
 		}
 	}
@@ -62,14 +62,15 @@ func (n *Node) UnmarshalJSON(b []byte) error {
 
 type Metadata struct {
 	Soul  string           `json:"#,omitempty"`
-	State map[string]int64 `json:">,omitempty"`
+	State map[string]State `json:">,omitempty"`
 }
 
-// TODO: put private methd to seal enum
+// TODO: put private method to seal enum
 type Value interface {
+	nodeValue()
 }
 
-func DecodeJSONValue(token json.Token, dec *json.Decoder) (Value, error) {
+func ValueDecodeJSON(token json.Token, dec *json.Decoder) (Value, error) {
 	switch token := token.(type) {
 	case nil:
 		return nil, nil
@@ -103,16 +104,27 @@ func DecodeJSONValue(token json.Token, dec *json.Decoder) (Value, error) {
 }
 
 type ValueString string
+
+func (ValueString) nodeValue() {}
+
 type ValueNumber string
+
+func (ValueNumber) nodeValue() {}
+
 type ValueBool bool
+
+func (ValueBool) nodeValue() {}
+
 type ValueRelation string
+
+func (ValueRelation) nodeValue() {}
 
 func (n ValueRelation) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]string{"#": string(n)})
 }
 
-type ValueWithState struct {
-	Value Value
-	// This is 0 for top-level values
-	State int64
-}
+// type ValueWithState struct {
+// 	Value Value
+// 	// This is 0 for top-level values
+// 	State int64
+// }

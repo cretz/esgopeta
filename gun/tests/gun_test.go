@@ -9,9 +9,8 @@ import (
 
 func TestGunGetSimple(t *testing.T) {
 	// Run the server, put in one call, get in another, then check
-	ctx, cancelFn := newContext(t)
+	ctx, cancelFn := newContextWithGunJServer(t)
 	defer cancelFn()
-	ctx.startGunJSServer()
 	randStr := randString(30)
 	// Write w/ JS
 	ctx.runJSWithGun(`
@@ -38,9 +37,8 @@ func TestGunGetSimple(t *testing.T) {
 }
 
 func TestGunPutSimple(t *testing.T) {
-	ctx, cancelFn := newContext(t)
+	ctx, cancelFn := newContextWithGunJServer(t)
 	defer cancelFn()
-	ctx.startGunJSServer()
 	randStr := randString(30)
 	// Put
 	g := ctx.newGunConnectedToGunJS()

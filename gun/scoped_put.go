@@ -13,8 +13,8 @@ type putResultListener struct {
 
 type PutResult struct {
 	Err error
-
-	peer *gunPeer
+	// Nil on error or local put success
+	Peer *Peer
 }
 
 type PutOption interface{}
@@ -71,7 +71,7 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 	}
 	// We know that the first has a soul
 	prevParentSoul := parents[0].cachedSoul()
-	currState := TimeNowUnixMs()
+	currState := StateNow()
 	for _, parent := range parents[1:] {
 		parentCachedSoul := parent.cachedSoul()
 		if parentCachedSoul == "" {
@@ -80,15 +80,14 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 			req.Put[prevParentSoul] = &Node{
 				Metadata: Metadata{
 					Soul:  prevParentSoul,
-					State: map[string]int64{parent.field: currState},
+					State: map[string]State{parent.field: currState},
 				},
 				Values: map[string]Value{parent.field: ValueRelation(parentCachedSoul)},
 			}
 			// Also store locally and set the cached soul
-			withState := &ValueWithState{ValueRelation(parentCachedSoul), currState}
 			// TODO: Should I not store until the very end just in case it errors halfway
 			// though? There are no standard cases where it should fail.
-			if ok, err := s.gun.storage.Put(ctx, prevParentSoul, parent.field, withState); err != nil {
+			if ok, err := s.gun.storage.Put(ctx, prevParentSoul, parent.field, ValueRelation(parentCachedSoul), currState); err != nil {
 				ch <- &PutResult{Err: err}
 				close(ch)
 				return ch
@@ -104,9 +103,8 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 		}
 		prevParentSoul = parentCachedSoul
 	}
-	// Now that we've setup all the parents, we can do this store locally.
-	withState := &ValueWithState{val, currState}
-	if ok, err := s.gun.storage.Put(ctx, prevParentSoul, s.field, withState); err != nil {
+	// Now that we've setup all the parents, we can do this store locally
+	if ok, err := s.gun.storage.Put(ctx, prevParentSoul, s.field, val, currState); err != nil {
 		ch <- &PutResult{Err: err}
 		close(ch)
 		return ch
@@ -125,7 +123,7 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 	req.Put[prevParentSoul] = &Node{
 		Metadata: Metadata{
 			Soul:  prevParentSoul,
-			State: map[string]int64{s.field: currState},
+			State: map[string]State{s.field: currState},
 		},
 		Values: map[string]Value{s.field: val},
 	}
@@ -134,7 +132,7 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 	s.putResultListenersLock.Lock()
 	s.putResultListeners[ch] = &putResultListener{req.ID, ch, msgCh}
 	s.putResultListenersLock.Unlock()
-	s.gun.RegisterMessageIDListener(req.ID, msgCh)
+	s.gun.registerMessageIDListener(req.ID, msgCh)
 	// Start message listener
 	go func() {
 		for {
@@ -147,7 +145,7 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 				if !ok {
 					return
 				}
-				r := &PutResult{peer: msg.peer}
+				r := &PutResult{Peer: msg.Peer}
 				if msg.Err != "" {
 					r.Err = fmt.Errorf("Remote error: %v", msg.Err)
 				} else if msg.OK != 1 {
@@ -159,10 +157,10 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 	}()
 	// Send async, sending back errors
 	go func() {
-		for peerErr := range s.gun.Send(ctx, req) {
+		for peerErr := range s.gun.send(ctx, req, nil) {
 			safePutResultSend(ch, &PutResult{
 				Err:  peerErr.Err,
-				peer: peerErr.peer,
+				Peer: peerErr.Peer,
 			})
 		}
 	}()
@@ -176,7 +174,7 @@ func (s *Scoped) PutDone(ch <-chan *PutResult) bool {
 	s.putResultListenersLock.Unlock()
 	if l != nil {
 		// Unregister the chan
-		s.gun.UnregisterMessageIDListener(l.id)
+		s.gun.unregisterMessageIDListener(l.id)
 		// Close the message chan and the result chan
 		close(l.receivedMessages)
 		close(l.results)
