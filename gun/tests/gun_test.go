@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/cretz/esgopeta/gun"
@@ -26,13 +27,37 @@ func TestGunGetSimple(t *testing.T) {
 	g := ctx.newGunConnectedToGunJS()
 	defer g.Close()
 	// Make sure we got back the same value
-	f := g.Scoped(ctx, "esgopeta-test", "TestGunGetSimple", "some-key").Val(ctx)
-	ctx.Require.NoError(f.Err)
-	ctx.Require.Equal(gun.ValueString(randStr), f.Value.(gun.ValueString))
+	r := g.Scoped(ctx, "esgopeta-test", "TestGunGetSimple", "some-key").FetchOne(ctx)
+	ctx.Require.NoError(r.Err)
+	ctx.Require.Equal(gun.ValueString(randStr), r.Value.(gun.ValueString))
 	// // Do it again TODO: make sure there are no network calls, it's all from mem
 	// ctx.debugf("Asking for key again")
-	// f = g.Scoped(ctx, "esgopeta-test", "TestGunGetSimple", "some-key").Val(ctx)
+	// f = g.Scoped(ctx, "esgopeta-test", "TestGunGetSimple", "some-key").FetchOne(ctx)
 	// ctx.Require.NoError(f.Err)
-	// ctx.Require.Equal(gun.ValueString(randStr), f.Value.Value.(gun.ValueString))
+	// ctx.Require.Equal(gun.ValueString(randStr), f.Value.(gun.ValueString))
+}
 
+func TestGunPutSimple(t *testing.T) {
+	ctx, cancelFn := newContext(t)
+	defer cancelFn()
+	ctx.startGunJSServer()
+	randStr := randString(30)
+	// Put
+	g := ctx.newGunConnectedToGunJS()
+	defer g.Close()
+	// Just wait for two acks (one local, one remote)
+	ch := g.Scoped(ctx, "esgopeta-test", "TestGunPutSimple", "some-key").Put(ctx, gun.ValueString(randStr))
+	// TODO: test local is null peer and remote is non-null
+	r := <-ch
+	ctx.Require.NoError(r.Err)
+	r = <-ch
+	ctx.Require.NoError(r.Err)
+	// Get from JS
+	out := ctx.runJSWithGun(`
+		gun.get('esgopeta-test').get('TestGunPutSimple').get('some-key').once(data => {
+			console.log(data)
+			process.exit(0)
+		})
+	`)
+	ctx.Require.Equal(randStr, strings.TrimSpace(string(out)))
 }

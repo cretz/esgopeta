@@ -10,6 +10,7 @@ var ErrStorageNotFound = errors.New("Not found")
 
 type Storage interface {
 	Get(ctx context.Context, parentSoul, field string) (*ValueWithState, error)
+	// If bool is false, it's deferred
 	Put(ctx context.Context, parentSoul, field string, val *ValueWithState) (bool, error)
 	Tracking(ctx context.Context, parentSoul, field string) (bool, error)
 }

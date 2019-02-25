@@ -12,6 +12,8 @@ type Message struct {
 	Put  map[string]*Node   `json:"put,omitempty"`
 	DAM  string             `json:"dam,omitempty"`
 	PID  string             `json:"pid,omitempty"`
+	OK   int                `json:"ok,omitempty"`
+	Err  string             `json:"err,omitempty"`
 }
 
 func (m *Message) Clone() *Message {

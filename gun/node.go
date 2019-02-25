@@ -7,7 +7,7 @@ import (
 	"strconv"
 )
 
-var SoulGenDefault = func() string {
+func DefaultSoulGen() string {
 	ms, uniqueNum := TimeNowUniqueUnix()
 	s := strconv.FormatInt(ms, 36)
 	if uniqueNum > 0 {
@@ -65,6 +65,7 @@ type Metadata struct {
 	State map[string]int64 `json:">,omitempty"`
 }
 
+// TODO: put private methd to seal enum
 type Value interface {
 }
 

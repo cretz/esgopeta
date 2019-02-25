@@ -16,8 +16,8 @@ type Gun struct {
 	myPeerID         string
 	tracking         Tracking
 
-	messageIDPutListeners     map[string]chan<- *MessageReceived
-	messageIDPutListenersLock sync.RWMutex
+	messageIDListeners     map[string]chan<- *MessageReceived
+	messageIDListenersLock sync.RWMutex
 }
 
 type Config struct {
@@ -42,14 +42,14 @@ const DefaultPeerSleepOnError = 30 * time.Second
 
 func New(ctx context.Context, config Config) (*Gun, error) {
 	g := &Gun{
-		peers:                 make([]*gunPeer, len(config.PeerURLs)),
-		storage:               config.Storage,
-		soulGen:               config.SoulGen,
-		peerErrorHandler:      config.PeerErrorHandler,
-		peerSleepOnError:      config.PeerSleepOnError,
-		myPeerID:              config.MyPeerID,
-		tracking:              config.Tracking,
-		messageIDPutListeners: map[string]chan<- *MessageReceived{},
+		peers:              make([]*gunPeer, len(config.PeerURLs)),
+		storage:            config.Storage,
+		soulGen:            config.SoulGen,
+		peerErrorHandler:   config.PeerErrorHandler,
+		peerSleepOnError:   config.PeerSleepOnError,
+		myPeerID:           config.MyPeerID,
+		tracking:           config.Tracking,
+		messageIDListeners: map[string]chan<- *MessageReceived{},
 	}
 	// Create all the peers
 	sleepOnError := config.PeerSleepOnError
@@ -78,7 +78,7 @@ func New(ctx context.Context, config Config) (*Gun, error) {
 		g.storage = &StorageInMem{}
 	}
 	if g.soulGen == nil {
-		g.soulGen = SoulGenDefault
+		g.soulGen = DefaultSoulGen
 	}
 	if g.myPeerID == "" {
 		g.myPeerID = randString(9)
@@ -162,10 +162,10 @@ func (g *Gun) startReceiving() {
 
 func (g *Gun) onPeerMessage(ctx context.Context, msg *MessageReceived) {
 	// If there is a listener for this message, use it
-	if msg.Ack != "" && len(msg.Put) > 0 {
-		g.messageIDPutListenersLock.RLock()
-		l := g.messageIDPutListeners[msg.Ack]
-		g.messageIDPutListenersLock.RUnlock()
+	if msg.Ack != "" {
+		g.messageIDListenersLock.RLock()
+		l := g.messageIDListeners[msg.Ack]
+		g.messageIDListenersLock.RUnlock()
 		if l != nil {
 			go safeReceivedMessageSend(l, msg)
 			return
@@ -195,21 +195,17 @@ func (g *Gun) onPeerError(err *ErrPeer) {
 	}
 }
 
-func (g *Gun) RegisterMessageIDPutListener(id string, ch chan<- *MessageReceived) {
-	g.messageIDPutListenersLock.Lock()
-	defer g.messageIDPutListenersLock.Unlock()
-	g.messageIDPutListeners[id] = ch
+func (g *Gun) RegisterMessageIDListener(id string, ch chan<- *MessageReceived) {
+	g.messageIDListenersLock.Lock()
+	defer g.messageIDListenersLock.Unlock()
+	g.messageIDListeners[id] = ch
 }
 
-func (g *Gun) UnregisterMessageIDPutListener(id string) {
-	g.messageIDPutListenersLock.Lock()
-	defer g.messageIDPutListenersLock.Unlock()
-	delete(g.messageIDPutListeners, id)
+func (g *Gun) UnregisterMessageIDListener(id string) {
+	g.messageIDListenersLock.Lock()
+	defer g.messageIDListenersLock.Unlock()
+	delete(g.messageIDListeners, id)
 }
-
-// func (g *Gun) RegisterValueIDPutListener(id string, ch chan<- *ReceivedMessage) {
-// 	panic("TODO")
-// }
 
 func (g *Gun) Scoped(ctx context.Context, key string, children ...string) *Scoped {
 	s := newScoped(g, nil, key)

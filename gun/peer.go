@@ -24,16 +24,20 @@ type Peer interface {
 	Close() error
 }
 
-var PeerURLSchemes = map[string]func(context.Context, *url.URL) (Peer, error){
-	"http": func(ctx context.Context, peerURL *url.URL) (Peer, error) {
-		schemeChangedURL := &url.URL{}
-		*schemeChangedURL = *peerURL
-		schemeChangedURL.Scheme = "ws"
-		return NewPeerWebSocket(ctx, schemeChangedURL)
-	},
-	"ws": func(ctx context.Context, peerURL *url.URL) (Peer, error) {
-		return NewPeerWebSocket(ctx, peerURL)
-	},
+var PeerURLSchemes map[string]func(context.Context, *url.URL) (Peer, error)
+
+func init() {
+	PeerURLSchemes = map[string]func(context.Context, *url.URL) (Peer, error){
+		"http": func(ctx context.Context, peerURL *url.URL) (Peer, error) {
+			schemeChangedURL := &url.URL{}
+			*schemeChangedURL = *peerURL
+			schemeChangedURL.Scheme = "ws"
+			return NewPeerWebSocket(ctx, schemeChangedURL)
+		},
+		"ws": func(ctx context.Context, peerURL *url.URL) (Peer, error) {
+			return NewPeerWebSocket(ctx, peerURL)
+		},
+	}
 }
 
 func NewPeer(ctx context.Context, peerURL string) (Peer, error) {
