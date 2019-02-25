@@ -8,7 +8,10 @@ import (
 )
 
 type Gun struct {
-	peers            []*Peer
+	// Never mutated, always overwritten
+	currentPeers     []*Peer
+	currentPeersLock sync.RWMutex
+
 	storage          Storage
 	soulGen          func() string
 	peerErrorHandler func(*ErrPeer)
@@ -16,12 +19,15 @@ type Gun struct {
 	myPeerID         string
 	tracking         Tracking
 
-	messageIDListeners     map[string]chan<- *MessageReceived
+	serversCancelFn context.CancelFunc
+
+	messageIDListeners     map[string]chan<- *messageReceived
 	messageIDListenersLock sync.RWMutex
 }
 
 type Config struct {
 	PeerURLs         []string
+	Servers          []Server
 	Storage          Storage
 	SoulGen          func() string
 	PeerErrorHandler func(*ErrPeer)
@@ -43,14 +49,14 @@ const DefaultOldestAllowedStorageValue = 7 * (60 * time.Minute)
 
 func New(ctx context.Context, config Config) (*Gun, error) {
 	g := &Gun{
-		peers:              make([]*Peer, len(config.PeerURLs)),
+		currentPeers:       make([]*Peer, len(config.PeerURLs)),
 		storage:            config.Storage,
 		soulGen:            config.SoulGen,
 		peerErrorHandler:   config.PeerErrorHandler,
 		peerSleepOnError:   config.PeerSleepOnError,
 		myPeerID:           config.MyPeerID,
 		tracking:           config.Tracking,
-		messageIDListeners: map[string]chan<- *MessageReceived{},
+		messageIDListeners: map[string]chan<- *messageReceived{},
 	}
 	// Create all the peers
 	sleepOnError := config.PeerSleepOnError
@@ -61,13 +67,13 @@ func New(ctx context.Context, config Config) (*Gun, error) {
 	for i := 0; i < len(config.PeerURLs) && err == nil; i++ {
 		peerURL := config.PeerURLs[i]
 		newConn := func() (PeerConn, error) { return NewPeerConn(ctx, peerURL) }
-		if g.peers[i], err = newPeer(peerURL, newConn, sleepOnError); err != nil {
+		if g.currentPeers[i], err = newPeer(peerURL, newConn, sleepOnError); err != nil {
 			err = fmt.Errorf("Failed connecting to peer %v: %v", peerURL, err)
 		}
 	}
 	// If there was an error, we need to close what we did create
 	if err != nil {
-		for _, peer := range g.peers {
+		for _, peer := range g.currentPeers {
 			if peer != nil {
 				peer.Close()
 			}
@@ -84,8 +90,12 @@ func New(ctx context.Context, config Config) (*Gun, error) {
 	if g.myPeerID == "" {
 		g.myPeerID = randString(9)
 	}
-	// Start receiving
-	g.startReceiving()
+	// Start receiving from peers
+	for _, peer := range g.currentPeers {
+		go g.startReceiving(peer)
+	}
+	// Start all the servers
+	go g.startServers(config.Servers)
 	return g, nil
 }
 
@@ -99,11 +109,12 @@ func (g *Gun) Scoped(ctx context.Context, key string, children ...string) *Scope
 
 func (g *Gun) Close() error {
 	var errs []error
-	for _, p := range g.peers {
+	for _, p := range g.peers() {
 		if err := p.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}
+	g.serversCancelFn()
 	if err := g.storage.Close(); err != nil {
 		errs = append(errs, err)
 	}
@@ -116,13 +127,41 @@ func (g *Gun) Close() error {
 	}
 }
 
+func (g *Gun) peers() []*Peer {
+	g.currentPeersLock.RLock()
+	defer g.currentPeersLock.RUnlock()
+	return g.currentPeers
+}
+
+func (g *Gun) addPeer(p *Peer) {
+	g.currentPeersLock.Lock()
+	defer g.currentPeersLock.Unlock()
+	prev := g.currentPeers
+	g.currentPeers = make([]*Peer, len(prev)+1)
+	copy(g.currentPeers, prev)
+	g.currentPeers[len(prev)] = p
+}
+
+func (g *Gun) removePeer(p *Peer) {
+	g.currentPeersLock.Lock()
+	defer g.currentPeersLock.Unlock()
+	prev := g.currentPeers
+	g.currentPeers = make([]*Peer, 0, len(prev))
+	for _, peer := range prev {
+		if peer != p {
+			g.currentPeers = append(g.currentPeers, peer)
+		}
+	}
+}
+
 func (g *Gun) send(ctx context.Context, msg *Message, ignorePeer *Peer) <-chan *ErrPeer {
-	ch := make(chan *ErrPeer, len(g.peers))
+	peers := g.peers()
+	ch := make(chan *ErrPeer, len(peers))
 	// Everything async
 	go func() {
 		defer close(ch)
 		var wg sync.WaitGroup
-		for _, peer := range g.peers {
+		for _, peer := range peers {
 			if peer == ignorePeer {
 				continue
 			}
@@ -131,6 +170,9 @@ func (g *Gun) send(ctx context.Context, msg *Message, ignorePeer *Peer) <-chan *
 				defer wg.Done()
 				// Just do nothing if the peer is bad and we couldn't send
 				if _, err := peer.send(ctx, msg); err != nil {
+					if !peer.reconnectSupported() {
+						g.removePeer(peer)
+					}
 					peerErr := &ErrPeer{err, peer}
 					go g.onPeerError(peerErr)
 					ch <- peerErr
@@ -142,33 +184,33 @@ func (g *Gun) send(ctx context.Context, msg *Message, ignorePeer *Peer) <-chan *
 	return ch
 }
 
-func (g *Gun) startReceiving() {
-	for _, peer := range g.peers {
-		go func(peer *Peer) {
-			// TDO: some kind of overall context is probably needed
-			ctx, cancelFn := context.WithCancel(context.TODO())
-			defer cancelFn()
-			for !peer.Closed() {
-				// We might not be able receive because peer is sleeping from
-				// an error happened within or a just-before send error.
-				if ok, msgs, err := peer.receive(ctx); !ok {
-					if err != nil {
-						go g.onPeerError(&ErrPeer{err, peer})
-					}
-					// Always sleep at least the err duration
-					time.Sleep(g.peerSleepOnError)
-				} else {
-					// Go over each message and see if it needs delivering or rebroadcasting
-					for _, msg := range msgs {
-						g.onPeerMessage(ctx, &MessageReceived{Message: msg, Peer: peer})
-					}
-				}
+func (g *Gun) startReceiving(peer *Peer) {
+	// TDO: some kind of overall context is probably needed
+	ctx, cancelFn := context.WithCancel(context.TODO())
+	defer cancelFn()
+	for !peer.Closed() {
+		// We might not be able receive because peer is sleeping from
+		// an error happened within or a just-before send error.
+		if ok, msgs, err := peer.receive(ctx); !ok {
+			if err != nil {
+				go g.onPeerError(&ErrPeer{err, peer})
 			}
-		}(peer)
+			// If can reconnect, sleep at least the err duration, otherwise remove
+			if peer.reconnectSupported() {
+				time.Sleep(g.peerSleepOnError)
+			} else {
+				g.removePeer(peer)
+			}
+		} else {
+			// Go over each message and see if it needs delivering or rebroadcasting
+			for _, msg := range msgs {
+				g.onPeerMessage(ctx, &messageReceived{Message: msg, peer: peer})
+			}
+		}
 	}
 }
 
-func (g *Gun) onPeerMessage(ctx context.Context, msg *MessageReceived) {
+func (g *Gun) onPeerMessage(ctx context.Context, msg *messageReceived) {
 	// If we're tracking everything, persist all puts here.
 	if g.tracking == TrackingEverything {
 		for parentSoul, node := range msg.Put {
@@ -195,17 +237,20 @@ func (g *Gun) onPeerMessage(ctx context.Context, msg *MessageReceived) {
 		if msg.PID == "" {
 			// This is a request, set the PID and send it back
 			msg.PID = g.myPeerID
-			if _, err := msg.Peer.send(ctx, msg.Message); err != nil {
-				go g.onPeerError(&ErrPeer{err, msg.Peer})
+			if _, err := msg.peer.send(ctx, msg.Message); err != nil {
+				go g.onPeerError(&ErrPeer{err, msg.peer})
+				if !msg.peer.reconnectSupported() {
+					g.removePeer(msg.peer)
+				}
 			}
 		} else {
 			// This is them telling us theirs
-			msg.Peer.id = msg.PID
+			msg.peer.id = msg.PID
 		}
 		return
 	}
 	// Unhandled message means rebroadcast
-	g.send(ctx, msg.Message, msg.Peer)
+	g.send(ctx, msg.Message, msg.peer)
 }
 
 func (g *Gun) onPeerError(err *ErrPeer) {
@@ -214,7 +259,7 @@ func (g *Gun) onPeerError(err *ErrPeer) {
 	}
 }
 
-func (g *Gun) registerMessageIDListener(id string, ch chan<- *MessageReceived) {
+func (g *Gun) registerMessageIDListener(id string, ch chan<- *messageReceived) {
 	g.messageIDListenersLock.Lock()
 	defer g.messageIDListenersLock.Unlock()
 	g.messageIDListeners[id] = ch
@@ -226,7 +271,7 @@ func (g *Gun) unregisterMessageIDListener(id string) {
 	delete(g.messageIDListeners, id)
 }
 
-func safeReceivedMessageSend(ch chan<- *MessageReceived, msg *MessageReceived) {
+func safeReceivedMessageSend(ch chan<- *messageReceived, msg *messageReceived) {
 	// Due to the fact that we may send on a closed channel here, we ignore the panic
 	defer func() { recover() }()
 	ch <- msg

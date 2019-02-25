@@ -2,13 +2,10 @@ package gun
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"sync"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 type ErrPeer struct {
@@ -19,7 +16,7 @@ type ErrPeer struct {
 func (e *ErrPeer) Error() string { return fmt.Sprintf("Error on peer %v: %v", e.Peer, e.Err) }
 
 type Peer struct {
-	url        string
+	name       string
 	newConn    func() (PeerConn, error)
 	sleepOnErr time.Duration // TODO: would be better as backoff
 	id         string
@@ -29,8 +26,8 @@ type Peer struct {
 	connLock    sync.Mutex
 }
 
-func newPeer(url string, newConn func() (PeerConn, error), sleepOnErr time.Duration) (*Peer, error) {
-	p := &Peer{url: url, newConn: newConn, sleepOnErr: sleepOnErr}
+func newPeer(name string, newConn func() (PeerConn, error), sleepOnErr time.Duration) (*Peer, error) {
+	p := &Peer{name: name, newConn: newConn, sleepOnErr: sleepOnErr}
 	var err error
 	if p.connCurrent, err = newConn(); err != nil {
 		return nil, err
@@ -45,14 +42,21 @@ func (p *Peer) String() string {
 	if p.id != "" {
 		id = "(id: " + p.id + ")"
 	}
-	connStatus := "connected"
-	if p.Conn() == nil {
-		connStatus = "disconnected"
+	connStatus := "disconnected"
+	if conn := p.Conn(); conn != nil {
+		connStatus = "connected to " + conn.RemoteURL()
 	}
-	return fmt.Sprintf("Peer%v %v (%v)", id, p.url, connStatus)
+	return fmt.Sprintf("Peer%v %v (%v)", id, p.name, connStatus)
+}
+
+func (p *Peer) reconnectSupported() bool {
+	return p.sleepOnErr > 0
 }
 
 func (p *Peer) reconnect() (err error) {
+	if !p.reconnectSupported() {
+		return fmt.Errorf("Reconnect not supported")
+	}
 	p.connLock.Lock()
 	defer p.connLock.Unlock()
 	if p.connCurrent == nil && p.connBad {
@@ -73,6 +77,10 @@ func (p *Peer) Conn() PeerConn {
 }
 
 func (p *Peer) markConnErrored(conn PeerConn) {
+	if !p.reconnectSupported() {
+		p.Close()
+		return
+	}
 	p.connLock.Lock()
 	defer p.connLock.Unlock()
 	if conn == p.connCurrent {
@@ -91,12 +99,12 @@ func (p *Peer) send(ctx context.Context, msg *Message, moreMsgs ...*Message) (ok
 	// Clone them with peer "to"
 	updatedMsg := &Message{}
 	*updatedMsg = *msg
-	updatedMsg.To = p.url
+	updatedMsg.To = conn.RemoteURL()
 	updatedMoreMsgs := make([]*Message, len(moreMsgs))
 	for i, moreMsg := range moreMsgs {
 		updatedMoreMsg := &Message{}
 		*updatedMoreMsg = *moreMsg
-		updatedMoreMsg.To = p.url
+		updatedMoreMsg.To = conn.RemoteURL()
 		updatedMoreMsgs[i] = updatedMoreMsg
 	}
 	if err = conn.Send(ctx, updatedMsg, updatedMoreMsgs...); err != nil {
@@ -138,8 +146,8 @@ func (p *Peer) Closed() bool {
 
 type PeerConn interface {
 	Send(ctx context.Context, msg *Message, moreMsgs ...*Message) error
-	// Chan is closed on first err, when context is closed, or when peer is closed
 	Receive(ctx context.Context) ([]*Message, error)
+	RemoteURL() string
 	Close() error
 }
 
@@ -151,10 +159,10 @@ func init() {
 			schemeChangedURL := &url.URL{}
 			*schemeChangedURL = *peerURL
 			schemeChangedURL.Scheme = "ws"
-			return NewPeerConnWebSocket(ctx, schemeChangedURL)
+			return DialPeerConnWebSocket(ctx, schemeChangedURL)
 		},
 		"ws": func(ctx context.Context, peerURL *url.URL) (PeerConn, error) {
-			return NewPeerConnWebSocket(ctx, peerURL)
+			return DialPeerConnWebSocket(ctx, peerURL)
 		},
 	}
 }
@@ -167,93 +175,4 @@ func NewPeerConn(ctx context.Context, peerURL string) (PeerConn, error) {
 	} else {
 		return peerNew(ctx, parsedURL)
 	}
-}
-
-type PeerConnWebSocket struct {
-	Underlying *websocket.Conn
-	WriteLock  sync.Mutex
-}
-
-func NewPeerConnWebSocket(ctx context.Context, peerUrl *url.URL) (*PeerConnWebSocket, error) {
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, peerUrl.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	return &PeerConnWebSocket{Underlying: conn}, nil
-}
-
-func (p *PeerConnWebSocket) Send(ctx context.Context, msg *Message, moreMsgs ...*Message) error {
-	// If there are more, send all as an array of JSON strings, otherwise just the msg
-	var toWrite interface{}
-	if len(moreMsgs) == 0 {
-		toWrite = msg
-	} else {
-		b, err := json.Marshal(msg)
-		if err != nil {
-			return err
-		}
-		msgs := []string{string(b)}
-		for _, nextMsg := range moreMsgs {
-			if b, err = json.Marshal(nextMsg); err != nil {
-				return err
-			}
-			msgs = append(msgs, string(b))
-		}
-		toWrite = msgs
-	}
-	// Send async so we can wait on context
-	errCh := make(chan error, 1)
-	go func() {
-		p.WriteLock.Lock()
-		defer p.WriteLock.Unlock()
-		errCh <- p.Underlying.WriteJSON(toWrite)
-	}()
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (p *PeerConnWebSocket) Receive(ctx context.Context) ([]*Message, error) {
-	bytsCh := make(chan []byte, 1)
-	errCh := make(chan error, 1)
-	go func() {
-		if _, b, err := p.Underlying.ReadMessage(); err != nil {
-			errCh <- err
-		} else {
-			bytsCh <- b
-		}
-	}()
-	select {
-	case err := <-errCh:
-		return nil, err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case byts := <-bytsCh:
-		// If it's a JSON array, it means it's an array of JSON strings, otherwise it's one message
-		if byts[0] != '[' {
-			var msg Message
-			if err := json.Unmarshal(byts, &msg); err != nil {
-				return nil, err
-			}
-			return []*Message{&msg}, nil
-		}
-		var jsonStrs []string
-		if err := json.Unmarshal(byts, &jsonStrs); err != nil {
-			return nil, err
-		}
-		msgs := make([]*Message, len(jsonStrs))
-		for i, jsonStr := range jsonStrs {
-			if err := json.Unmarshal([]byte(jsonStr), &(msgs[i])); err != nil {
-				return nil, err
-			}
-		}
-		return msgs, nil
-	}
-}
-
-func (p *PeerConnWebSocket) Close() error {
-	return p.Underlying.Close()
 }

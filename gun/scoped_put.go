@@ -8,7 +8,7 @@ import (
 type putResultListener struct {
 	id               string
 	results          chan *PutResult
-	receivedMessages chan *MessageReceived
+	receivedMessages chan *messageReceived
 }
 
 type PutResult struct {
@@ -120,7 +120,7 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 		Values: map[string]Value{s.field: val},
 	}
 	// Make a msg chan and register it to listen for acks
-	msgCh := make(chan *MessageReceived)
+	msgCh := make(chan *messageReceived)
 	s.putResultListenersLock.Lock()
 	s.putResultListeners[ch] = &putResultListener{req.ID, ch, msgCh}
 	s.putResultListenersLock.Unlock()
@@ -137,7 +137,7 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 				if !ok {
 					return
 				}
-				r := &PutResult{Peer: msg.Peer}
+				r := &PutResult{Peer: msg.peer}
 				if msg.Err != "" {
 					r.Err = fmt.Errorf("Remote error: %v", msg.Err)
 				} else if msg.OK != 1 {

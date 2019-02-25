@@ -21,7 +21,9 @@ type MessageGetRequest struct {
 	Field string `json:".,omitempty"`
 }
 
-type MessageReceived struct {
+type messageReceived struct {
 	*Message
-	Peer *Peer
+
+	peer   *Peer
+	stored bool
 }

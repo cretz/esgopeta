@@ -5,6 +5,24 @@ import (
 	"fmt"
 )
 
+type fetchResultListener struct {
+	id               string
+	results          chan *FetchResult
+	receivedMessages chan *messageReceived
+}
+
+type FetchResult struct {
+	// This can be a context error on cancelation
+	Err   error
+	Field string
+	// Nil if the value doesn't exist, exists and is nil, or there's an error
+	Value       Value
+	State       State // This can be 0 for errors or top-level value relations
+	ValueExists bool
+	// Nil when local and sometimes on error
+	Peer *Peer
+}
+
 func (s *Scoped) FetchOne(ctx context.Context) *FetchResult {
 	// Try local before remote
 	if r := s.FetchOneLocal(ctx); r.Err != nil || r.ValueExists {
@@ -83,7 +101,7 @@ func (s *Scoped) fetchRemote(ctx context.Context, ch chan *FetchResult) {
 	// Make a chan to listen for received messages and link it to
 	// the given one so we can turn it "off". Off will close this
 	// chan.
-	msgCh := make(chan *MessageReceived)
+	msgCh := make(chan *messageReceived)
 	s.fetchResultListenersLock.Lock()
 	s.fetchResultListeners[ch] = &fetchResultListener{req.ID, ch, msgCh}
 	s.fetchResultListenersLock.Unlock()
@@ -104,7 +122,7 @@ func (s *Scoped) fetchRemote(ctx context.Context, ch chan *FetchResult) {
 				if !ok {
 					return
 				}
-				r := &FetchResult{Field: s.field, Peer: msg.Peer}
+				r := &FetchResult{Field: s.field, Peer: msg.peer}
 				// We asked for a single field, should only get that field or it doesn't exist
 				if msg.Err != "" {
 					r.Err = fmt.Errorf("Remote error: %v", msg.Err)
@@ -165,22 +183,4 @@ func safeFetchResultSend(ch chan<- *FetchResult, r *FetchResult) {
 	// Due to the fact that we may send on a closed channel here, we ignore the panic
 	defer func() { recover() }()
 	ch <- r
-}
-
-type fetchResultListener struct {
-	id               string
-	results          chan *FetchResult
-	receivedMessages chan *MessageReceived
-}
-
-type FetchResult struct {
-	// This can be a context error on cancelation
-	Err   error
-	Field string
-	// Nil if the value doesn't exist, exists and is nil, or there's an error
-	Value       Value
-	State       State // This can be 0 for errors or top-level value relations
-	ValueExists bool
-	// Nil when local and sometimes on error
-	Peer *Peer
 }
