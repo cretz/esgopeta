@@ -39,6 +39,7 @@ const (
 )
 
 const DefaultPeerSleepOnError = 30 * time.Second
+const DefaultOldestAllowedStorageValue = 7 * (60 * time.Minute)
 
 func New(ctx context.Context, config Config) (*Gun, error) {
 	g := &Gun{
@@ -75,7 +76,7 @@ func New(ctx context.Context, config Config) (*Gun, error) {
 	}
 	// Set defaults
 	if g.storage == nil {
-		g.storage = &StorageInMem{}
+		g.storage = NewStorageInMem(DefaultOldestAllowedStorageValue)
 	}
 	if g.soulGen == nil {
 		g.soulGen = DefaultSoulGen
@@ -102,6 +103,9 @@ func (g *Gun) Close() error {
 		if err := p.Close(); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	if err := g.storage.Close(); err != nil {
+		errs = append(errs, err)
 	}
 	if len(errs) == 0 {
 		return nil
@@ -165,6 +169,17 @@ func (g *Gun) startReceiving() {
 }
 
 func (g *Gun) onPeerMessage(ctx context.Context, msg *MessageReceived) {
+	// If we're tracking everything, persist all puts here.
+	if g.tracking == TrackingEverything {
+		for parentSoul, node := range msg.Put {
+			for field, value := range node.Values {
+				if state, ok := node.Metadata.State[field]; ok {
+					// TODO: warn on error or something
+					g.storage.Put(ctx, parentSoul, field, value, state, false)
+				}
+			}
+		}
+	}
 	// If there is a listener for this message, use it
 	if msg.Ack != "" {
 		g.messageIDListenersLock.RLock()

@@ -122,9 +122,3 @@ func (ValueRelation) nodeValue() {}
 func (n ValueRelation) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]string{"#": string(n)})
 }
-
-// type ValueWithState struct {
-// 	Value Value
-// 	// This is 0 for top-level values
-// 	State int64
-// }

@@ -9,8 +9,10 @@ import (
 
 func TestGunGetSimple(t *testing.T) {
 	// Run the server, put in one call, get in another, then check
-	ctx, cancelFn := newContextWithGunJServer(t)
+	ctx, cancelFn := newContext(t)
 	defer cancelFn()
+	serverCancelFn := ctx.startGunJSServer()
+	defer serverCancelFn()
 	randStr := randString(30)
 	// Write w/ JS
 	ctx.runJSWithGun(`
@@ -29,11 +31,12 @@ func TestGunGetSimple(t *testing.T) {
 	r := g.Scoped(ctx, "esgopeta-test", "TestGunGetSimple", "some-key").FetchOne(ctx)
 	ctx.Require.NoError(r.Err)
 	ctx.Require.Equal(gun.ValueString(randStr), r.Value.(gun.ValueString))
-	// // Do it again TODO: make sure there are no network calls, it's all from mem
-	// ctx.debugf("Asking for key again")
-	// f = g.Scoped(ctx, "esgopeta-test", "TestGunGetSimple", "some-key").FetchOne(ctx)
-	// ctx.Require.NoError(f.Err)
-	// ctx.Require.Equal(gun.ValueString(randStr), f.Value.(gun.ValueString))
+	// Do it again with the JS server closed since it should fetch from memory
+	serverCancelFn()
+	ctx.debugf("Asking for key again")
+	r = g.Scoped(ctx, "esgopeta-test", "TestGunGetSimple", "some-key").FetchOne(ctx)
+	ctx.Require.NoError(r.Err)
+	ctx.Require.Equal(gun.ValueString(randStr), r.Value.(gun.ValueString))
 }
 
 func TestGunPutSimple(t *testing.T) {
@@ -59,3 +62,12 @@ func TestGunPutSimple(t *testing.T) {
 	`)
 	ctx.Require.Equal(randStr, strings.TrimSpace(string(out)))
 }
+
+/*
+TODO Tests to write:
+* test put w/ future state happens then
+* test put w/ old state is discarded
+* test put w/ new state is persisted
+* test put w/ same state but greater is persisted
+* test put w/ same state but less is discarded
+*/

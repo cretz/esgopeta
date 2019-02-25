@@ -1,7 +1,8 @@
 package gun
 
 import (
-	"sync/atomic"
+	"bytes"
+	"encoding/json"
 	"time"
 )
 
@@ -9,42 +10,40 @@ type State uint64
 
 func StateNow() State { return State(timeNowUnixMs()) }
 
-// timeFromUnixMs returns zero'd time if ms is 0
-func timeFromUnixMs(ms int64) time.Time {
-	if ms == 0 {
-		return time.Time{}
-	}
-	return time.Unix(0, ms*int64(time.Millisecond))
+func StateFromTime(t time.Time) State { return State(timeToUnixMs(t)) }
+
+type ConflictResolution int
+
+const (
+	ConflictResolutionNeverSeenUpdate ConflictResolution = iota
+	ConflictResolutionTooFutureDeferred
+	ConflictResolutionOlderHistorical
+	ConflictResolutionNewerUpdate
+	ConflictResolutionSameKeep
+	ConflictResolutionSameUpdate
+)
+
+func (c ConflictResolution) IsImmediateUpdate() bool {
+	return c == ConflictResolutionNeverSeenUpdate || c == ConflictResolutionNewerUpdate || c == ConflictResolutionSameUpdate
 }
 
-// timeToUnixMs returns 0 if t.IsZero
-func timeToUnixMs(t time.Time) int64 {
-	if t.IsZero() {
-		return 0
-	}
-	return t.UnixNano() / int64(time.Millisecond)
-}
-
-func timeNowUnixMs() int64 {
-	return timeToUnixMs(time.Now())
-}
-
-var lastNano int64
-
-// uniqueNano is 0 if ms is first time seen, otherwise a unique num in combination with ms
-func timeNowUniqueUnix() (ms int64, uniqueNum int64) {
-	now := time.Now()
-	newNano := now.UnixNano()
-	for {
-		prevLastNano := lastNano
-		if prevLastNano < newNano && atomic.CompareAndSwapInt64(&lastNano, prevLastNano, newNano) {
-			ms = newNano / int64(time.Millisecond)
-			// If was same ms as seen before, set uniqueNum to the nano part
-			if prevLastNano/int64(time.Millisecond) == ms {
-				uniqueNum = newNano%int64(time.Millisecond) + 1
-			}
-			return
-		}
-		newNano = prevLastNano + 1
+func ConflictResolve(existingVal Value, existingState State, newVal Value, newState State, sysState State) ConflictResolution {
+	// Existing gunjs impl serializes to JSON first to do lexical comparisons, so we will too
+	if sysState < newState {
+		return ConflictResolutionTooFutureDeferred
+	} else if newState < existingState {
+		return ConflictResolutionOlderHistorical
+	} else if existingState < newState {
+		return ConflictResolutionNewerUpdate
+	} else if existingVal == newVal {
+		return ConflictResolutionSameKeep
+	} else if existingJSON, err := json.Marshal(existingVal); err != nil {
+		panic(err)
+	} else if newJSON, err := json.Marshal(newVal); err != nil {
+		panic(err)
+	} else if bytes.Compare(existingJSON, newJSON) < 0 {
+		return ConflictResolutionSameUpdate
+	} else {
+		return ConflictResolutionSameKeep
 	}
 }

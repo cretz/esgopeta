@@ -87,12 +87,8 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 			// Also store locally and set the cached soul
 			// TODO: Should I not store until the very end just in case it errors halfway
 			// though? There are no standard cases where it should fail.
-			if ok, err := s.gun.storage.Put(ctx, prevParentSoul, parent.field, ValueRelation(parentCachedSoul), currState); err != nil {
+			if _, err := s.gun.storage.Put(ctx, prevParentSoul, parent.field, ValueRelation(parentCachedSoul), currState, false); err != nil {
 				ch <- &PutResult{Err: err}
-				close(ch)
-				return ch
-			} else if !ok {
-				ch <- &PutResult{Err: fmt.Errorf("Unexpected deferred local store")}
 				close(ch)
 				return ch
 			} else if !parent.setCachedSoul(ValueRelation(parentCachedSoul)) {
@@ -104,12 +100,8 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 		prevParentSoul = parentCachedSoul
 	}
 	// Now that we've setup all the parents, we can do this store locally
-	if ok, err := s.gun.storage.Put(ctx, prevParentSoul, s.field, val, currState); err != nil {
+	if _, err := s.gun.storage.Put(ctx, prevParentSoul, s.field, val, currState, false); err != nil {
 		ch <- &PutResult{Err: err}
-		close(ch)
-		return ch
-	} else if !ok {
-		ch <- &PutResult{Err: fmt.Errorf("Unexpected deferred local store")}
 		close(ch)
 		return ch
 	}

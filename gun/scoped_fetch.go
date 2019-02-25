@@ -89,8 +89,10 @@ func (s *Scoped) fetchRemote(ctx context.Context, ch chan *FetchResult) {
 	s.fetchResultListenersLock.Unlock()
 	// Listen for responses to this get
 	s.gun.registerMessageIDListener(req.ID, msgCh)
-	// TODO: only for children: s.gun.RegisterValueIDListener(s.id, msgCh)
+	// TODO: Also listen for any changes to the value or just for specific requests?
 	// Handle received messages turning them to value fetches
+	var lastSeenValue Value
+	var lastSeenState State
 	go func() {
 		for {
 			select {
@@ -106,12 +108,28 @@ func (s *Scoped) fetchRemote(ctx context.Context, ch chan *FetchResult) {
 				// We asked for a single field, should only get that field or it doesn't exist
 				if msg.Err != "" {
 					r.Err = fmt.Errorf("Remote error: %v", msg.Err)
-				} else if n := msg.Put[parentSoul]; n != nil && n.Values[s.field] != nil {
-					r.Value, r.State, r.ValueExists = n.Values[s.field], n.State[s.field], true
+				} else if n := msg.Put[parentSoul]; n != nil {
+					if newVal, ok := n.Values[s.field]; ok {
+						newState := n.State[s.field]
+						// Dedupe the value
+						if lastSeenValue == newVal && lastSeenState == newState {
+							continue
+						}
+						// If we're storing only what we requested (we do "everything" at a higher level), do it here
+						// and only send result if it was an update. Otherwise only do it if we would have done one.
+						confRes := ConflictResolutionNeverSeenUpdate
+						if s.gun.tracking == TrackingRequested {
+							confRes, r.Err = s.gun.storage.Put(ctx, parentSoul, s.field, newVal, newState, false)
+						} else if lastSeenState > 0 {
+							confRes = ConflictResolve(lastSeenValue, lastSeenState, newVal, newState, StateNow())
+						}
+						// If there are no errors and it was an update, update the last seen and set the response vals
+						if r.Err == nil && confRes.IsImmediateUpdate() {
+							lastSeenValue, lastSeenState = newVal, newState
+							r.Value, r.State, r.ValueExists = newVal, newState, true
+						}
+					}
 				}
-				// TODO: conflict resolution and defer
-				// TODO: dedupe
-				// TODO: store and cache
 				safeFetchResultSend(ch, r)
 			}
 		}
