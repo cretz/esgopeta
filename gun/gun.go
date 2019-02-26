@@ -211,17 +211,32 @@ func (g *Gun) startReceiving(peer *Peer) {
 }
 
 func (g *Gun) onPeerMessage(ctx context.Context, msg *messageReceived) {
-	// If we're tracking everything, persist all puts here.
-	if g.tracking == TrackingEverything {
+	// TODO:
+	//	* if message-acks are not considered part of a store-all server's storage, then use msg.Ack
+	//	  to determine whether we even put here instead of how we do it now.
+	//	* handle gets
+
+	// If we're tracking anything, we try to put it (may only be if exists)
+	if g.tracking != TrackingNothing {
+		// If we're tracking everything, we persist everything. Otherwise if we're
+		// only tracking requested, we persist only if it already exists.
+		putOnlyIfExists := g.tracking == TrackingRequested
 		for parentSoul, node := range msg.Put {
 			for field, value := range node.Values {
 				if state, ok := node.Metadata.State[field]; ok {
-					// TODO: warn on error or something
-					g.storage.Put(ctx, parentSoul, field, value, state, false)
+					// TODO: warn on other error or something
+					_, err := g.storage.Put(ctx, parentSoul, field, value, state, putOnlyIfExists)
+					if err == nil {
+						if msg.storedPuts == nil {
+							msg.storedPuts = map[string][]string{}
+						}
+						msg.storedPuts[parentSoul] = append(msg.storedPuts[parentSoul], field)
+					}
 				}
 			}
 		}
 	}
+
 	// If there is a listener for this message, use it
 	if msg.Ack != "" {
 		g.messageIDListenersLock.RLock()
@@ -232,6 +247,7 @@ func (g *Gun) onPeerMessage(ctx context.Context, msg *messageReceived) {
 			return
 		}
 	}
+
 	// DAM messages are either requests for our ID or setting of theirs
 	if msg.DAM != "" {
 		if msg.PID == "" {
@@ -249,6 +265,7 @@ func (g *Gun) onPeerMessage(ctx context.Context, msg *messageReceived) {
 		}
 		return
 	}
+
 	// Unhandled message means rebroadcast
 	g.send(ctx, msg.Message, msg.peer)
 }

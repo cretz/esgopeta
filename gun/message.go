@@ -24,6 +24,6 @@ type MessageGetRequest struct {
 type messageReceived struct {
 	*Message
 
-	peer   *Peer
-	stored bool
+	peer       *Peer
+	storedPuts map[string][]string
 }

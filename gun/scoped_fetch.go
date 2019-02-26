@@ -137,7 +137,17 @@ func (s *Scoped) fetchRemote(ctx context.Context, ch chan *FetchResult) {
 						// and only send result if it was an update. Otherwise only do it if we would have done one.
 						confRes := ConflictResolutionNeverSeenUpdate
 						if s.gun.tracking == TrackingRequested {
-							confRes, r.Err = s.gun.storage.Put(ctx, parentSoul, s.field, newVal, newState, false)
+							// Wait, wait, we may have already stored this
+							alreadyStored := false
+							for _, storedField := range msg.storedPuts[parentSoul] {
+								if storedField == s.field {
+									alreadyStored = true
+									break
+								}
+							}
+							if !alreadyStored {
+								confRes, r.Err = s.gun.storage.Put(ctx, parentSoul, s.field, newVal, newState, false)
+							}
 						} else if lastSeenState > 0 {
 							confRes = ConflictResolve(lastSeenValue, lastSeenState, newVal, newState, StateNow())
 						}
