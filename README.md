@@ -44,6 +44,7 @@ func main() {
 	if err != nil {
 		log.Panic(err)
 	}
+	defer g.Close()
 	// Issue a fetch and get a channel for updates
 	fetchCh := g.Scoped(ctx, "esgopeta-example", "sample-key").Fetch(ctx)
 	// Log all updates and exit when context times out
@@ -89,6 +90,7 @@ func main() {
 	if err != nil {
 		log.Panic(err)
 	}
+	defer g.Close()
 	// Issue a simple put and wait for a single peer ack
 	putScope := g.Scoped(ctx, "esgopeta-example", "sample-key")
 	log.Print("Sending first value")
