@@ -11,8 +11,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func (t *testContext) startGunWebSocketProxyLogger(listenPort, targetPort int) {
-	fromGun, toGun := t.startGunWebSocketProxy(listenPort, targetPort)
+func (t *testContext) startGunWebSocketProxyLogger(listenPort int, targetURL string) {
+	fromGun, toGun := t.startGunWebSocketProxy(listenPort, targetURL)
 	time.Sleep(time.Second)
 	go func() {
 		for {
@@ -70,14 +70,14 @@ func (t *testContext) formattedGunJSONs(msg []byte) []string {
 	return ret
 }
 
-func (t *testContext) startGunWebSocketProxy(listenPort, targetPort int) (fromTarget <-chan []byte, toTarget <-chan []byte) {
+func (t *testContext) startGunWebSocketProxy(listenPort int, targetURL string) (fromTarget <-chan []byte, toTarget <-chan []byte) {
 	fromTargetCh := make(chan []byte)
 	toTargetCh := make(chan []byte)
 	server := &http.Server{
 		Addr: "127.0.0.1:" + strconv.Itoa(listenPort),
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			t.debugf("New ws proxy connection")
-			err := t.handleGunWebSocketProxy(targetPort, w, r, fromTargetCh, toTargetCh)
+			err := t.handleGunWebSocketProxy(targetURL, w, r, fromTargetCh, toTargetCh)
 			if _, ok := err.(*websocket.CloseError); !ok {
 				t.debugf("Unexpected web socket close error: %v", err)
 			}
@@ -99,13 +99,13 @@ func (t *testContext) startGunWebSocketProxy(listenPort, targetPort int) (fromTa
 var wsDefaultUpgrader = websocket.Upgrader{}
 
 func (t *testContext) handleGunWebSocketProxy(
-	targetPort int,
+	targetURL string,
 	w http.ResponseWriter,
 	r *http.Request,
 	fromOther chan<- []byte,
 	toOther chan<- []byte,
 ) error {
-	otherConn, _, err := websocket.DefaultDialer.DialContext(t, "ws://127.0.0.1:"+strconv.Itoa(targetPort)+"/gun", nil)
+	otherConn, _, err := websocket.DefaultDialer.DialContext(t, targetURL, nil)
 	if err != nil {
 		return err
 	}

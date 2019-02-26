@@ -65,7 +65,6 @@ type Metadata struct {
 	State map[string]State `json:">,omitempty"`
 }
 
-// TODO: put private method to seal enum
 type Value interface {
 	nodeValue()
 }

@@ -39,6 +39,33 @@ func TestGunGetSimple(t *testing.T) {
 	ctx.Require.Equal(gun.ValueString(randStr), r.Value.(gun.ValueString))
 }
 
+func TestGunGetSimpleRemote(t *testing.T) {
+	// Do the above but w/ remote server
+	ctx, cancelFn := newContext(t)
+	defer cancelFn()
+	remoteURL := ctx.prepareRemoteGunServer(defaultRemoteGunServerURL)
+	randKey, randVal := "key-"+randString(30), gun.ValueString(randString(30))
+	// Write w/ JS
+	ctx.debugf("Writing value")
+	ctx.runJSWithGunURL(remoteURL, `
+		gun.get('esgopeta-test').get('TestGunGetSimpleRemote').get('`+randKey+`').put('`+string(randVal)+`', ack => {
+			if (ack.err) {
+				console.error(ack.err)
+				process.exit(1)
+			}
+			process.exit(0)
+		})
+	`)
+	// Get
+	ctx.debugf("Reading value")
+	g := ctx.newGunConnectedToGunServer(remoteURL)
+	defer g.Close()
+	// Make sure we got back the same value
+	r := g.Scoped(ctx, "esgopeta-test", "TestGunGetSimpleRemote", randKey).FetchOne(ctx)
+	ctx.Require.NoError(r.Err)
+	ctx.Require.Equal(randVal, r.Value)
+}
+
 func TestGunPutSimple(t *testing.T) {
 	ctx, cancelFn := newContextWithGunJServer(t)
 	defer cancelFn()
@@ -61,6 +88,40 @@ func TestGunPutSimple(t *testing.T) {
 		})
 	`)
 	ctx.Require.Equal(randStr, strings.TrimSpace(string(out)))
+}
+
+func TestGunPubSubSimpleRemote(t *testing.T) {
+	ctx, cancelFn := newContext(t)
+	defer cancelFn()
+	remoteURL := ctx.prepareRemoteGunServer(defaultRemoteGunServerURL)
+	randKey, randVal := "key-"+randString(30), gun.ValueString(randString(30))
+	// Start a fetcher
+	ctx.debugf("Starting fetcher")
+	fetchGun := ctx.newGunConnectedToGunServer(remoteURL)
+	defer fetchGun.Close()
+	fetchCh := fetchGun.Scoped(ctx, "esgopeta-test", "TestGunPubSubSimpleRemote", randKey).Fetch(ctx)
+	// Now put it from another instance
+	ctx.debugf("Putting data")
+	putGun := ctx.newGunConnectedToGunServer(remoteURL)
+	defer putGun.Close()
+	putScope := putGun.Scoped(ctx, "esgopeta-test", "TestGunPubSubSimpleRemote", randKey)
+	putScope.Put(ctx, randVal)
+	ctx.debugf("Checking fetcher")
+	// See that the fetch got the value
+	for {
+		select {
+		case <-ctx.Done():
+			ctx.Require.NoError(ctx.Err())
+		case result := <-fetchCh:
+			ctx.Require.NoError(result.Err)
+			if !result.ValueExists {
+				ctx.debugf("No value, trying again (got %v)", result)
+				continue
+			}
+			ctx.Require.Equal(randVal, result.Value)
+			return
+		}
+	}
 }
 
 /*

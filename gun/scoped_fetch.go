@@ -7,6 +7,7 @@ import (
 
 type fetchResultListener struct {
 	id               string
+	parentSoul       string
 	results          chan *FetchResult
 	receivedMessages chan *messageReceived
 }
@@ -103,10 +104,11 @@ func (s *Scoped) fetchRemote(ctx context.Context, ch chan *FetchResult) {
 	// chan.
 	msgCh := make(chan *messageReceived)
 	s.fetchResultListenersLock.Lock()
-	s.fetchResultListeners[ch] = &fetchResultListener{req.ID, ch, msgCh}
+	s.fetchResultListeners[ch] = &fetchResultListener{req.ID, parentSoul, ch, msgCh}
 	s.fetchResultListenersLock.Unlock()
 	// Listen for responses to this get
 	s.gun.registerMessageIDListener(req.ID, msgCh)
+	s.gun.registerMessageSoulListener(parentSoul, msgCh)
 	// TODO: Also listen for any changes to the value or just for specific requests?
 	// Handle received messages turning them to value fetches
 	var lastSeenValue Value
@@ -182,6 +184,7 @@ func (s *Scoped) FetchDone(ch <-chan *FetchResult) bool {
 	if l != nil {
 		// Unregister the chan
 		s.gun.unregisterMessageIDListener(l.id)
+		s.gun.unregisterMessageSoulListener(l.parentSoul)
 		// Close the message chan and the result chan
 		close(l.receivedMessages)
 		close(l.results)

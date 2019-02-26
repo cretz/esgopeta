@@ -23,6 +23,9 @@ type Gun struct {
 
 	messageIDListeners     map[string]chan<- *messageReceived
 	messageIDListenersLock sync.RWMutex
+
+	messageSoulListeners     map[string]chan<- *messageReceived
+	messageSoulListenersLock sync.RWMutex
 }
 
 type Config struct {
@@ -49,14 +52,15 @@ const DefaultOldestAllowedStorageValue = 7 * (60 * time.Minute)
 
 func New(ctx context.Context, config Config) (*Gun, error) {
 	g := &Gun{
-		currentPeers:       make([]*Peer, len(config.PeerURLs)),
-		storage:            config.Storage,
-		soulGen:            config.SoulGen,
-		peerErrorHandler:   config.PeerErrorHandler,
-		peerSleepOnError:   config.PeerSleepOnError,
-		myPeerID:           config.MyPeerID,
-		tracking:           config.Tracking,
-		messageIDListeners: map[string]chan<- *messageReceived{},
+		currentPeers:         make([]*Peer, len(config.PeerURLs)),
+		storage:              config.Storage,
+		soulGen:              config.SoulGen,
+		peerErrorHandler:     config.PeerErrorHandler,
+		peerSleepOnError:     config.PeerSleepOnError,
+		myPeerID:             config.MyPeerID,
+		tracking:             config.Tracking,
+		messageIDListeners:   map[string]chan<- *messageReceived{},
+		messageSoulListeners: map[string]chan<- *messageReceived{},
 	}
 	// Create all the peers
 	sleepOnError := config.PeerSleepOnError
@@ -216,7 +220,7 @@ func (g *Gun) onPeerMessage(ctx context.Context, msg *messageReceived) {
 	//	  to determine whether we even put here instead of how we do it now.
 	//	* handle gets
 
-	// If we're tracking anything, we try to put it (may only be if exists)
+	// If we're tracking anything, we try to put it (may only be if exists).
 	if g.tracking != TrackingNothing {
 		// If we're tracking everything, we persist everything. Otherwise if we're
 		// only tracking requested, we persist only if it already exists.
@@ -237,7 +241,7 @@ func (g *Gun) onPeerMessage(ctx context.Context, msg *messageReceived) {
 		}
 	}
 
-	// If there is a listener for this message, use it
+	// If there is a listener for this message ID, use it and consider the message handled
 	if msg.Ack != "" {
 		g.messageIDListenersLock.RLock()
 		l := g.messageIDListeners[msg.Ack]
@@ -245,6 +249,16 @@ func (g *Gun) onPeerMessage(ctx context.Context, msg *messageReceived) {
 		if l != nil {
 			go safeReceivedMessageSend(l, msg)
 			return
+		}
+	}
+
+	// If there are listeners for any of the souls, use them but don't consider the message handled
+	for parentSoul := range msg.Put {
+		g.messageSoulListenersLock.RLock()
+		l := g.messageSoulListeners[parentSoul]
+		g.messageSoulListenersLock.RUnlock()
+		if l != nil {
+			go safeReceivedMessageSend(l, msg)
 		}
 	}
 
@@ -286,6 +300,18 @@ func (g *Gun) unregisterMessageIDListener(id string) {
 	g.messageIDListenersLock.Lock()
 	defer g.messageIDListenersLock.Unlock()
 	delete(g.messageIDListeners, id)
+}
+
+func (g *Gun) registerMessageSoulListener(soul string, ch chan<- *messageReceived) {
+	g.messageSoulListenersLock.Lock()
+	defer g.messageSoulListenersLock.Unlock()
+	g.messageSoulListeners[soul] = ch
+}
+
+func (g *Gun) unregisterMessageSoulListener(soul string) {
+	g.messageSoulListenersLock.Lock()
+	defer g.messageSoulListenersLock.Unlock()
+	delete(g.messageSoulListeners, soul)
 }
 
 func safeReceivedMessageSend(ch chan<- *messageReceived, msg *messageReceived) {

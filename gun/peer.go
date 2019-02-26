@@ -161,7 +161,16 @@ func init() {
 			schemeChangedURL.Scheme = "ws"
 			return DialPeerConnWebSocket(ctx, schemeChangedURL)
 		},
+		"https": func(ctx context.Context, peerURL *url.URL) (PeerConn, error) {
+			schemeChangedURL := &url.URL{}
+			*schemeChangedURL = *peerURL
+			schemeChangedURL.Scheme = "wss"
+			return DialPeerConnWebSocket(ctx, schemeChangedURL)
+		},
 		"ws": func(ctx context.Context, peerURL *url.URL) (PeerConn, error) {
+			return DialPeerConnWebSocket(ctx, peerURL)
+		},
+		"wss": func(ctx context.Context, peerURL *url.URL) (PeerConn, error) {
 			return DialPeerConnWebSocket(ctx, peerURL)
 		},
 	}

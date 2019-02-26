@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/cretz/esgopeta/gun"
 	"github.com/stretchr/testify/require"
@@ -21,6 +23,8 @@ type testContext struct {
 	Require   *require.Assertions
 	GunJSPort int
 }
+
+const defaultTestTimeout = 1 * time.Minute
 
 func newContext(t *testing.T) (*testContext, context.CancelFunc) {
 	return withTestContext(context.Background(), t)
@@ -36,9 +40,10 @@ func newContextWithGunJServer(t *testing.T) (*testContext, context.CancelFunc) {
 }
 
 const defaultGunJSPort = 8080
+const defaultRemoteGunServerURL = "https://gunjs.herokuapp.com/gun"
 
 func withTestContext(ctx context.Context, t *testing.T) (*testContext, context.CancelFunc) {
-	ctx, cancelFn := context.WithCancel(ctx)
+	ctx, cancelFn := context.WithTimeout(ctx, defaultTestTimeout)
 	return &testContext{
 		Context:   ctx,
 		T:         t,
@@ -65,10 +70,14 @@ func (t *testContext) runJS(script string) []byte {
 }
 
 func (t *testContext) runJSWithGun(script string) []byte {
+	return t.runJSWithGunURL("http://127.0.0.1:"+strconv.Itoa(t.GunJSPort)+"/gun", script)
+}
+
+func (t *testContext) runJSWithGunURL(url string, script string) []byte {
 	return t.runJS(`
 		var Gun = require('gun')
 		const gun = Gun({
-			peers: ['http://127.0.0.1:` + strconv.Itoa(t.GunJSPort) + `/gun'],
+			peers: ['` + url + `'],
 			radisk: false
 		})
 		` + script)
@@ -90,7 +99,7 @@ func (t *testContext) startGunJSServer() context.CancelFunc {
 	// If we're logging, use a proxy
 	port := t.GunJSPort
 	if testing.Verbose() {
-		t.startGunWebSocketProxyLogger(port, port+1)
+		t.startGunWebSocketProxyLogger(port, "ws://127.0.0.1:"+strconv.Itoa(port+1)+"/gun")
 		port++
 	}
 	// Remove entire data folder first just in case
@@ -108,12 +117,25 @@ func (t *testContext) startGunJSServer() context.CancelFunc {
 	}
 }
 
+func (t *testContext) prepareRemoteGunServer(origURL string) (newURL string) {
+	// If we're verbose, use proxy, otherwise just use orig
+	if !testing.Verbose() {
+		return origURL
+	}
+	origURL = strings.Replace(origURL, "http://", "ws://", 1)
+	origURL = strings.Replace(origURL, "https://", "wss://", 1)
+	t.startGunWebSocketProxyLogger(t.GunJSPort, origURL)
+	return "http://127.0.0.1:" + strconv.Itoa(t.GunJSPort) + "/gun"
+}
+
 func (t *testContext) newGunConnectedToGunJS() *gun.Gun {
+	return t.newGunConnectedToGunServer("http://127.0.0.1:" + strconv.Itoa(t.GunJSPort) + "/gun")
+}
+
+func (t *testContext) newGunConnectedToGunServer(url string) *gun.Gun {
 	config := gun.Config{
-		PeerURLs: []string{"http://127.0.0.1:" + strconv.Itoa(t.GunJSPort) + "/gun"},
-		PeerErrorHandler: func(errPeer *gun.ErrPeer) {
-			t.debugf("Got peer error: %v", errPeer)
-		},
+		PeerURLs:         []string{url},
+		PeerErrorHandler: func(errPeer *gun.ErrPeer) { t.debugf("Got peer error: %v", errPeer) },
 	}
 	g, err := gun.New(t, config)
 	t.Require.NoError(err)
