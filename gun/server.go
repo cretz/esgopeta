@@ -4,14 +4,19 @@ import (
 	"context"
 )
 
+// Server is the interface implemented by servers.
 type Server interface {
-	Serve() error // Hangs forever
+	// Serve is called by Gun to start the server. It should not return until
+	// an error occurs or Close is called.
+	Serve() error
+	// Accept is called to wait for the next peer connection or if an error
+	// occurs while trying.
 	Accept() (PeerConn, error)
+	// Close is called by Gun to stop and close this server.
 	Close() error
 }
 
-func (g *Gun) startServers(servers []Server) {
-	ctx := context.Background()
+func (g *Gun) startServers(ctx context.Context, servers []Server) {
 	ctx, g.serversCancelFn = context.WithCancel(ctx)
 	for _, server := range servers {
 		// TODO: log error?

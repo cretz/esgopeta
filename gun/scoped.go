@@ -7,6 +7,7 @@ import (
 	"sync"
 )
 
+// Scoped is a contextual, namespaced field to read or write.
 type Scoped struct {
 	gun *Gun
 
@@ -32,10 +33,21 @@ func newScoped(gun *Gun, parent *Scoped, field string) *Scoped {
 	}
 }
 
+// ErrNotObject occurs when a put or a fetch is attempted as a child of an
+// existing, non-relation value.
 var ErrNotObject = errors.New("Scoped value not an object")
+
+// ErrLookupOnTopLevel occurs when a put or remote fetch is attempted on
+// a top-level field.
 var ErrLookupOnTopLevel = errors.New("Cannot do put/lookup on top level")
 
-// Empty string if doesn't exist, ErrNotObject if self or parent not an object
+// Soul returns the current soul of this value relation. It returns a cached
+// value if called before. Otherwise, it does a FetchOne to get the value
+// and return its soul if a relation. If any parent is not a relation or this
+// value exists and is not a relation, ErrNotObject is returned. If this field
+// doesn't exist yet, an empty string is returned with no error. Otherwise,
+// the soul of the relation is returned. The context can be used to timeout the
+// fetch.
 func (s *Scoped) Soul(ctx context.Context) (string, error) {
 	if cachedSoul := s.cachedSoul(); cachedSoul != "" {
 		return cachedSoul, nil
@@ -68,8 +80,11 @@ func (s *Scoped) setCachedSoul(val ValueRelation) bool {
 	return true
 }
 
-func (s *Scoped) Scoped(ctx context.Context, key string, children ...string) *Scoped {
-	ret := newScoped(s.gun, s, key)
+// Scoped returns a scoped instance to the given field and children for reading
+// and writing. This is the equivalent of calling the Gun JS API "get" function
+// (sans callback) for each field/child.
+func (s *Scoped) Scoped(ctx context.Context, field string, children ...string) *Scoped {
+	ret := newScoped(s.gun, s, field)
 	for _, child := range children {
 		ret = newScoped(s.gun, ret, child)
 	}

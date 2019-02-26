@@ -17,7 +17,7 @@ func TestGunJS(t *testing.T) {
 	defer cancelFn()
 	randStr := randString(30)
 	ctx.runJSWithGun(`
-		gun.get('esgopeta-test').get('TestGunJS').get('some-key').put('` + randStr + `', ack => {
+		gun.get('esgopeta-test').get('TestGunJS').get('some-field').put('` + randStr + `', ack => {
 			if (ack.err) {
 				console.error(ack.err)
 				process.exit(1)
@@ -26,7 +26,7 @@ func TestGunJS(t *testing.T) {
 		})
 	`)
 	out := ctx.runJSWithGun(`
-		gun.get('esgopeta-test').get('TestGunJS').get('some-key').once(data => {
+		gun.get('esgopeta-test').get('TestGunJS').get('some-field').once(data => {
 			console.log(data)
 			process.exit(0)
 		})

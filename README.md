@@ -3,7 +3,7 @@
 Esgopeta is a Go implementation of the [Gun](https://github.com/amark/gun) distributed graph database. See the
 [Godoc](https://godoc.org/github.com/cretz/esgopeta/gun) for API details.
 
-**WARNING: This is an early proof-of-concept alpha version. Many pieces are not implemented.**
+**WARNING: This is an early proof-of-concept alpha version. Many pieces are not implemented or don't work.**
 
 Features:
 

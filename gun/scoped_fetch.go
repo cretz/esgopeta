@@ -12,18 +12,39 @@ type fetchResultListener struct {
 	receivedMessages chan *messageReceived
 }
 
+// FetchResult is a result of a fetch.
 type FetchResult struct {
-	// This can be a context error on cancelation
-	Err   error
+	// Err is any error on fetch, local or remote. This can be a context error
+	// if the fetch's context completes. This is nil on successful fetch.
+	//
+	// This may be ErrLookupOnTopLevel for a remote fetch of a top-level field.
+	// This may be ErrNotObject if the field is a child of a non-relation value.
+	Err error
+	// Field is the name of the field that was fetched. It is a convenience
+	// value for the scope's field this was originally called on.
 	Field string
-	// Nil if the value doesn't exist, exists and is nil, or there's an error
-	Value       Value
-	State       State // This can be 0 for errors or top-level value relations
+	// Value is the fetched value. This will be nil if Err is not nil. This will
+	// also be nil if a peer said the value does not exist. This will also be
+	// nil if the value exists but is nil. Use ValueExists to distinguish
+	// between the last two cases.
+	Value Value
+	// State is the conflict state of the value. It may be 0 for errors. It may
+	// also be 0 if this is a top-level field.
+	State State
+	// ValueExists is true if there is no error and the fetched value, nil or
+	// not, does exist.
 	ValueExists bool
-	// Nil when local and sometimes on error
+	// Peer is the peer this result is for. This is nil for results from local
+	// storage. This may be nil on error.
 	Peer *Peer
 }
 
+// FetchOne fetches a single result, trying local first. It is a shortcut for
+// calling FetchOneLocal and if it doesn't exist falling back to FetchOneRemote.
+// This should not be called on a top-level field. The context can be used to
+// timeout the wait.
+//
+// This is the equivalent of the Gun JS API "once" function.
 func (s *Scoped) FetchOne(ctx context.Context) *FetchResult {
 	// Try local before remote
 	if r := s.FetchOneLocal(ctx); r.Err != nil || r.ValueExists {
@@ -32,6 +53,8 @@ func (s *Scoped) FetchOne(ctx context.Context) *FetchResult {
 	return s.FetchOneRemote(ctx)
 }
 
+// FetchOneLocal gets a local value from storage. For top-level fields, it
+// simply returns the field name as a relation.
 func (s *Scoped) FetchOneLocal(ctx context.Context) *FetchResult {
 	// If there is no parent, this is just the relation
 	if s.parent == nil {
@@ -50,6 +73,10 @@ func (s *Scoped) FetchOneLocal(ctx context.Context) *FetchResult {
 	return r
 }
 
+// FetchOneRemote fetches a single result from the first peer that responds. It
+// will not look in storage first. This will error if called for a top-level
+// field. This is a shortcut for calling FetchRemote, waiting for a single
+// value, then calling FetchDone. The context can be used to timeout the wait.
 func (s *Scoped) FetchOneRemote(ctx context.Context) *FetchResult {
 	if s.parent == nil {
 		return &FetchResult{Err: ErrLookupOnTopLevel, Field: s.field}
@@ -59,6 +86,15 @@ func (s *Scoped) FetchOneRemote(ctx context.Context) *FetchResult {
 	return <-ch
 }
 
+// Fetch fetches and listens for updates on the field and sends them to the
+// resulting channel. This will error if called for a top-level field. The
+// resulting channel is closed on Gun close, context completion, or when
+// FetchDone is called with it. Users should ensure one of the three happen in a
+// reasonable timeframe to stop listening and prevent leaks. This is a shortcut
+// for FetchOneLocal (but doesn't send to channel if doesn't exist) followed by
+// FetchRemote.
+//
+// This is the equivalent of the Gun JS API "on" function.
 func (s *Scoped) Fetch(ctx context.Context) <-chan *FetchResult {
 	ch := make(chan *FetchResult, 1)
 	if s.parent == nil {
@@ -73,11 +109,15 @@ func (s *Scoped) Fetch(ctx context.Context) <-chan *FetchResult {
 	return ch
 }
 
+// FetchRemote fetches and listens for updates on a field only from peers, not
+// via storage. This will error if called for a top-level field. The resulting
+// channel is closed on Gun close, context completion, or when FetchDone is
+// called with it. Users should ensure one of the three happen in a reasonable
+// timeframe to stop listening and prevent leaks.
 func (s *Scoped) FetchRemote(ctx context.Context) <-chan *FetchResult {
 	ch := make(chan *FetchResult, 1)
 	if s.parent == nil {
 		ch <- &FetchResult{Err: ErrLookupOnTopLevel, Field: s.field}
-		close(ch)
 	} else {
 		go s.fetchRemote(ctx, ch)
 	}
@@ -176,6 +216,9 @@ func (s *Scoped) fetchRemote(ctx context.Context, ch chan *FetchResult) {
 	}()
 }
 
+// FetchDone is called with a channel returned from Fetch or FetchRemote to stop
+// listening and close the channel. It returns true if it actually stopped
+// listening or false if it wasn't listening.
 func (s *Scoped) FetchDone(ch <-chan *FetchResult) bool {
 	s.fetchResultListenersLock.Lock()
 	l := s.fetchResultListeners[ch]

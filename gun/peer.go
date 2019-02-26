@@ -8,13 +8,19 @@ import (
 	"time"
 )
 
+// ErrPeer is an error specific to a peer.
 type ErrPeer struct {
-	Err  error
+	// Err is the error.
+	Err error
+	// Peer is the peer the error relates to.
 	Peer *Peer
 }
 
 func (e *ErrPeer) Error() string { return fmt.Sprintf("Error on peer %v: %v", e.Peer, e.Err) }
 
+// Peer is a known peer to Gun. It has a single connection. Some peers are
+// "reconnectable" which means due to failure, they may be in a "bad" state
+// awaiting reconnection.
 type Peer struct {
 	name       string
 	newConn    func() (PeerConn, error)
@@ -35,8 +41,15 @@ func newPeer(name string, newConn func() (PeerConn, error), sleepOnErr time.Dura
 	return p, nil
 }
 
+// ID is the identifier of the peer as given by the peer. It is empty if the
+// peer wasn't asked for or didn't give an ID.
 func (p *Peer) ID() string { return p.id }
 
+// Name is the name of the peer which is usually the URL.
+func (p *Peer) Name() string { return p.name }
+
+// String is a string representation of the peer including whether it's
+// connected.
 func (p *Peer) String() string {
 	id := ""
 	if p.id != "" {
@@ -69,7 +82,8 @@ func (p *Peer) reconnect() (err error) {
 	return
 }
 
-// Can be nil peer if currently bad or closed
+// Conn is the underlying PeerConn. This can be nil if the peer is currently
+// "bad" or closed.
 func (p *Peer) Conn() PeerConn {
 	p.connLock.Lock()
 	defer p.connLock.Unlock()
@@ -110,9 +124,8 @@ func (p *Peer) send(ctx context.Context, msg *Message, moreMsgs ...*Message) (ok
 	if err = conn.Send(ctx, updatedMsg, updatedMoreMsgs...); err != nil {
 		p.markConnErrored(conn)
 		return false, err
-	} else {
-		return true, nil
 	}
+	return true, nil
 }
 
 func (p *Peer) receive(ctx context.Context) (ok bool, msgs []*Message, err error) {
@@ -126,6 +139,7 @@ func (p *Peer) receive(ctx context.Context) (ok bool, msgs []*Message, err error
 	}
 }
 
+// Close closes the peer and the connection is connected.
 func (p *Peer) Close() error {
 	p.connLock.Lock()
 	defer p.connLock.Unlock()
@@ -138,19 +152,30 @@ func (p *Peer) Close() error {
 	return err
 }
 
+// Closed is whether the peer is closed.
 func (p *Peer) Closed() bool {
 	p.connLock.Lock()
 	defer p.connLock.Unlock()
 	return p.connCurrent == nil && !p.connBad
 }
 
+// PeerConn is a single peer connection.
 type PeerConn interface {
+	// Send sends the given message (and maybe others) to the peer. The context
+	// governs just this send.
 	Send(ctx context.Context, msg *Message, moreMsgs ...*Message) error
+	// Receive waits for the next message (or set of messages if sent at once)
+	// from a peer. The context can be used to control a timeout.
 	Receive(ctx context.Context) ([]*Message, error)
+	// RemoteURL is the URL this peer is connected via.
 	RemoteURL() string
+	// Close closes this connection.
 	Close() error
 }
 
+// PeerURLSchemes is the map that maps URL schemes to factory functions to
+// create the connection. Currently "http" and "https" simply defer to "ws" and
+// "wss" respectively. "ws" and "wss" use DialPeerConnWebSocket.
 var PeerURLSchemes map[string]func(context.Context, *url.URL) (PeerConn, error)
 
 func init() {
@@ -176,6 +201,7 @@ func init() {
 	}
 }
 
+// NewPeerConn connects to a peer for the given URL.
 func NewPeerConn(ctx context.Context, peerURL string) (PeerConn, error) {
 	if parsedURL, err := url.Parse(peerURL); err != nil {
 		return nil, err

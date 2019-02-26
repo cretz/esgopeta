@@ -2,6 +2,7 @@ package gun
 
 import "encoding/json"
 
+// Message is the JSON-encodable message that Gun peers send to each other.
 type Message struct {
 	Ack  string             `json:"@,omitempty"`
 	ID   string             `json:"#,omitempty"`
@@ -16,6 +17,7 @@ type Message struct {
 	Err  string             `json:"err,omitempty"`
 }
 
+// MessageGetRequest is the format for Message.Get.
 type MessageGetRequest struct {
 	Soul  string `json:"#,omitempty"`
 	Field string `json:".,omitempty"`
@@ -23,7 +25,10 @@ type MessageGetRequest struct {
 
 type messageReceived struct {
 	*Message
-
-	peer       *Peer
+	peer *Peer
+	// storedPuts are the souls and their fields that have been stored by
+	// another part of the code. This is useful if the main instance stores
+	// something it sees, there's no need for the message listener to do so as
+	// well.
 	storedPuts map[string][]string
 }

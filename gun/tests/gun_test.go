@@ -16,7 +16,7 @@ func TestGunGetSimple(t *testing.T) {
 	randStr := randString(30)
 	// Write w/ JS
 	ctx.runJSWithGun(`
-		gun.get('esgopeta-test').get('TestGunGetSimple').get('some-key').put('` + randStr + `', ack => {
+		gun.get('esgopeta-test').get('TestGunGetSimple').get('some-field').put('` + randStr + `', ack => {
 			if (ack.err) {
 				console.error(ack.err)
 				process.exit(1)
@@ -28,13 +28,13 @@ func TestGunGetSimple(t *testing.T) {
 	g := ctx.newGunConnectedToGunJS()
 	defer g.Close()
 	// Make sure we got back the same value
-	r := g.Scoped(ctx, "esgopeta-test", "TestGunGetSimple", "some-key").FetchOne(ctx)
+	r := g.Scoped(ctx, "esgopeta-test", "TestGunGetSimple", "some-field").FetchOne(ctx)
 	ctx.Require.NoError(r.Err)
 	ctx.Require.Equal(gun.ValueString(randStr), r.Value.(gun.ValueString))
 	// Do it again with the JS server closed since it should fetch from memory
 	serverCancelFn()
-	ctx.debugf("Asking for key again")
-	r = g.Scoped(ctx, "esgopeta-test", "TestGunGetSimple", "some-key").FetchOne(ctx)
+	ctx.debugf("Asking for field again")
+	r = g.Scoped(ctx, "esgopeta-test", "TestGunGetSimple", "some-field").FetchOne(ctx)
 	ctx.Require.NoError(r.Err)
 	ctx.Require.Equal(gun.ValueString(randStr), r.Value.(gun.ValueString))
 }
@@ -44,11 +44,11 @@ func TestGunGetSimpleRemote(t *testing.T) {
 	ctx, cancelFn := newContext(t)
 	defer cancelFn()
 	remoteURL := ctx.prepareRemoteGunServer(defaultRemoteGunServerURL)
-	randKey, randVal := "key-"+randString(30), gun.ValueString(randString(30))
+	randField, randVal := "field-"+randString(30), gun.ValueString(randString(30))
 	// Write w/ JS
 	ctx.debugf("Writing value")
 	ctx.runJSWithGunURL(remoteURL, `
-		gun.get('esgopeta-test').get('TestGunGetSimpleRemote').get('`+randKey+`').put('`+string(randVal)+`', ack => {
+		gun.get('esgopeta-test').get('TestGunGetSimpleRemote').get('`+randField+`').put('`+string(randVal)+`', ack => {
 			if (ack.err) {
 				console.error(ack.err)
 				process.exit(1)
@@ -61,7 +61,7 @@ func TestGunGetSimpleRemote(t *testing.T) {
 	g := ctx.newGunConnectedToGunServer(remoteURL)
 	defer g.Close()
 	// Make sure we got back the same value
-	r := g.Scoped(ctx, "esgopeta-test", "TestGunGetSimpleRemote", randKey).FetchOne(ctx)
+	r := g.Scoped(ctx, "esgopeta-test", "TestGunGetSimpleRemote", randField).FetchOne(ctx)
 	ctx.Require.NoError(r.Err)
 	ctx.Require.Equal(randVal, r.Value)
 }
@@ -74,7 +74,7 @@ func TestGunPutSimple(t *testing.T) {
 	g := ctx.newGunConnectedToGunJS()
 	defer g.Close()
 	// Just wait for two acks (one local, one remote)
-	ch := g.Scoped(ctx, "esgopeta-test", "TestGunPutSimple", "some-key").Put(ctx, gun.ValueString(randStr))
+	ch := g.Scoped(ctx, "esgopeta-test", "TestGunPutSimple", "some-field").Put(ctx, gun.ValueString(randStr))
 	// TODO: test local is null peer and remote is non-null
 	r := <-ch
 	ctx.Require.NoError(r.Err)
@@ -82,7 +82,7 @@ func TestGunPutSimple(t *testing.T) {
 	ctx.Require.NoError(r.Err)
 	// Get from JS
 	out := ctx.runJSWithGun(`
-		gun.get('esgopeta-test').get('TestGunPutSimple').get('some-key').once(data => {
+		gun.get('esgopeta-test').get('TestGunPutSimple').get('some-field').once(data => {
 			console.log(data)
 			process.exit(0)
 		})
@@ -94,17 +94,17 @@ func TestGunPubSubSimpleRemote(t *testing.T) {
 	ctx, cancelFn := newContext(t)
 	defer cancelFn()
 	remoteURL := ctx.prepareRemoteGunServer(defaultRemoteGunServerURL)
-	randKey, randVal := "key-"+randString(30), gun.ValueString(randString(30))
+	randField, randVal := "field-"+randString(30), gun.ValueString(randString(30))
 	// Start a fetcher
 	ctx.debugf("Starting fetcher")
 	fetchGun := ctx.newGunConnectedToGunServer(remoteURL)
 	defer fetchGun.Close()
-	fetchCh := fetchGun.Scoped(ctx, "esgopeta-test", "TestGunPubSubSimpleRemote", randKey).Fetch(ctx)
+	fetchCh := fetchGun.Scoped(ctx, "esgopeta-test", "TestGunPubSubSimpleRemote", randField).Fetch(ctx)
 	// Now put it from another instance
 	ctx.debugf("Putting data")
 	putGun := ctx.newGunConnectedToGunServer(remoteURL)
 	defer putGun.Close()
-	putScope := putGun.Scoped(ctx, "esgopeta-test", "TestGunPubSubSimpleRemote", randKey)
+	putScope := putGun.Scoped(ctx, "esgopeta-test", "TestGunPubSubSimpleRemote", randField)
 	putScope.Put(ctx, randVal)
 	ctx.debugf("Checking fetcher")
 	// See that the fetch got the value

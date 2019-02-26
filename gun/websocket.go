@@ -19,7 +19,9 @@ type serverWebSocket struct {
 	serveErrCh     chan error
 }
 
+// NewServerWebSocket creates a new Server for the given HTTP server and given upgrader.
 func NewServerWebSocket(server *http.Server, upgrader *websocket.Upgrader) Server {
+	// TODO: wait, what if they already have a server and want to control serve, close, and handler?
 	if upgrader == nil {
 		upgrader = &websocket.Upgrader{}
 	}
@@ -64,23 +66,27 @@ func (s *serverWebSocket) Close() error {
 	return s.server.Close()
 }
 
+// PeerConnWebSocket implements PeerConn for a websocket connection.
 type PeerConnWebSocket struct {
 	Underlying *websocket.Conn
 	WriteLock  sync.Mutex
 }
 
-func DialPeerConnWebSocket(ctx context.Context, peerUrl *url.URL) (*PeerConnWebSocket, error) {
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, peerUrl.String(), nil)
+// DialPeerConnWebSocket opens a peer websocket connection.
+func DialPeerConnWebSocket(ctx context.Context, peerURL *url.URL) (*PeerConnWebSocket, error) {
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, peerURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
 	return NewPeerConnWebSocket(conn), nil
 }
 
+// NewPeerConnWebSocket wraps an existing websocket connection.
 func NewPeerConnWebSocket(underlying *websocket.Conn) *PeerConnWebSocket {
 	return &PeerConnWebSocket{Underlying: underlying}
 }
 
+// Send implements PeerConn.Send.
 func (p *PeerConnWebSocket) Send(ctx context.Context, msg *Message, moreMsgs ...*Message) error {
 	// If there are more, send all as an array of JSON strings, otherwise just the msg
 	var toWrite interface{}
@@ -115,6 +121,7 @@ func (p *PeerConnWebSocket) Send(ctx context.Context, msg *Message, moreMsgs ...
 	}
 }
 
+// Receive implements PeerConn.Receive.
 func (p *PeerConnWebSocket) Receive(ctx context.Context) ([]*Message, error) {
 	bytsCh := make(chan []byte, 1)
 	errCh := make(chan error, 1)
@@ -153,10 +160,12 @@ func (p *PeerConnWebSocket) Receive(ctx context.Context) ([]*Message, error) {
 	}
 }
 
+// RemoteURL implements PeerConn.RemoteURL.
 func (p *PeerConnWebSocket) RemoteURL() string {
 	return fmt.Sprintf("http://%v", p.Underlying.RemoteAddr())
 }
 
+// Close implements PeerConn.Close.
 func (p *PeerConnWebSocket) Close() error {
 	return p.Underlying.Close()
 }

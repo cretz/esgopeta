@@ -11,22 +11,53 @@ type putResultListener struct {
 	receivedMessages chan *messageReceived
 }
 
+// PutResult is either an acknowledgement or an error for a put.
 type PutResult struct {
+	// Err is any error on put, local or remote. This can be a context error
+	// if the put's context completes. This is nil on successful put.
+	//
+	// This may be ErrLookupOnTopLevel for a remote fetch of a top-level field.
+	// This may be ErrNotObject if the field is a child of a non-relation value.
 	Err error
-	// Nil on error or local put success
+	// Field is the name of the field that was put. It is a convenience value
+	// for the scope's field this was originally called on.
+	Field string
+	// Peer is the peer this result is for. This is nil for results from local
+	// storage. This may be nil on error.
 	Peer *Peer
 }
 
-type PutOption interface{}
+// PutOption is the base interface for all options that can be passed to Put.
+type PutOption interface {
+	putOption()
+}
 
 type putOptionStoreLocalOnly struct{}
 
-func PutOptionStoreLocalOnly() PutOption { return putOptionStoreLocalOnly{} }
+func (putOptionStoreLocalOnly) putOption() {}
+
+// PutOptionStoreLocalOnly makes Put only store locally and then be done.
+var PutOptionStoreLocalOnly PutOption = putOptionStoreLocalOnly{}
 
 type putOptionFailWithoutParent struct{}
 
-func PutOptionFailWithoutParent() PutOption { return putOptionFailWithoutParent{} }
+func (putOptionFailWithoutParent) putOption() {}
 
+// PutOptionFailWithoutParent makes Put fail if it would need to lazily create
+// parent relations.
+var PutOptionFailWithoutParent PutOption = putOptionFailWithoutParent{}
+
+// Put puts a value on the field in local storage. It also sends the put to all
+// peers unless the PutOptionStoreLocalOnly option is present. Each
+// acknowledgement or error will be sent to the resulting channel. Unless the
+// PutOptionFailWithoutParent option is present, this will lazily create all
+// parent relations that do not already exist. This will error if called for a
+// top-level field. The resulting channel is closed on Gun close, context
+// completion, or when PutDone is called with it. Users should ensure one of the
+// three happen in a reasonable timeframe to stop listening for acks and prevent
+// leaks.
+//
+// This is the equivalent of the Gun JS API "put" function.
 func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *PutResult {
 	// Collect the options
 	storeLocalOnly := false
@@ -47,19 +78,16 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 	}
 	if len(parents) == 0 {
 		ch <- &PutResult{Err: ErrLookupOnTopLevel}
-		close(ch)
 		return ch
 	}
 	// Ask for the soul on the last parent. What this will do is trigger
 	// lazy soul fetch up the chain. Then we can go through and find who doesn't have a
 	// cached soul, create one, and store locally.
 	if soul, err := parents[len(parents)-1].Soul(ctx); err != nil {
-		ch <- &PutResult{Err: ErrLookupOnTopLevel}
-		close(ch)
+		ch <- &PutResult{Err: ErrLookupOnTopLevel, Field: s.field}
 		return ch
 	} else if soul == "" && failWithoutParent {
-		ch <- &PutResult{Err: fmt.Errorf("Parent not present but required")}
-		close(ch)
+		ch <- &PutResult{Err: fmt.Errorf("Parent not present but required"), Field: s.field}
 		return ch
 	}
 	// Now for every parent that doesn't have a cached soul we create one and
@@ -88,12 +116,10 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 			// TODO: Should I not store until the very end just in case it errors halfway
 			// though? There are no standard cases where it should fail.
 			if _, err := s.gun.storage.Put(ctx, prevParentSoul, parent.field, ValueRelation(parentCachedSoul), currState, false); err != nil {
-				ch <- &PutResult{Err: err}
-				close(ch)
+				ch <- &PutResult{Err: err, Field: s.field}
 				return ch
 			} else if !parent.setCachedSoul(ValueRelation(parentCachedSoul)) {
-				ch <- &PutResult{Err: fmt.Errorf("Concurrent cached soul set")}
-				close(ch)
+				ch <- &PutResult{Err: fmt.Errorf("Concurrent cached soul set"), Field: s.field}
 				return ch
 			}
 		}
@@ -101,14 +127,12 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 	}
 	// Now that we've setup all the parents, we can do this store locally
 	if _, err := s.gun.storage.Put(ctx, prevParentSoul, s.field, val, currState, false); err != nil {
-		ch <- &PutResult{Err: err}
-		close(ch)
+		ch <- &PutResult{Err: err, Field: s.field}
 		return ch
 	}
 	// We need an ack for local store and stop if local only
-	ch <- &PutResult{}
+	ch <- &PutResult{Field: s.field}
 	if storeLocalOnly {
-		close(ch)
 		return ch
 	}
 	// Now, we begin the remote storing
@@ -130,14 +154,14 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 		for {
 			select {
 			case <-ctx.Done():
-				ch <- &PutResult{Err: ctx.Err()}
+				ch <- &PutResult{Err: ctx.Err(), Field: s.field}
 				s.PutDone(ch)
 				return
 			case msg, ok := <-msgCh:
 				if !ok {
 					return
 				}
-				r := &PutResult{Peer: msg.peer}
+				r := &PutResult{Field: s.field, Peer: msg.peer}
 				if msg.Err != "" {
 					r.Err = fmt.Errorf("Remote error: %v", msg.Err)
 				} else if msg.OK != 1 {
@@ -151,14 +175,18 @@ func (s *Scoped) Put(ctx context.Context, val Value, opts ...PutOption) <-chan *
 	go func() {
 		for peerErr := range s.gun.send(ctx, req, nil) {
 			safePutResultSend(ch, &PutResult{
-				Err:  peerErr.Err,
-				Peer: peerErr.Peer,
+				Err:   peerErr.Err,
+				Field: s.field,
+				Peer:  peerErr.Peer,
 			})
 		}
 	}()
 	return ch
 }
 
+// PutDone is called with a channel returned from Put to stop
+// listening for acks and close the channel. It returns true if it actually
+// stopped listening or false if it wasn't listening.
 func (s *Scoped) PutDone(ch <-chan *PutResult) bool {
 	s.putResultListenersLock.Lock()
 	l := s.putResultListeners[ch]

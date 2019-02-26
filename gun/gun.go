@@ -7,8 +7,11 @@ import (
 	"time"
 )
 
+// Gun is the main client/server instance for the database.
 type Gun struct {
-	// Never mutated, always overwritten
+	// currentPeers is the up-to-date peer list. Do not access this without
+	// using the associated lock. This slice is never mutated, only replaced.
+	// There are methods to get and change the list.
 	currentPeers     []*Peer
 	currentPeersLock sync.RWMutex
 
@@ -28,28 +31,67 @@ type Gun struct {
 	messageSoulListenersLock sync.RWMutex
 }
 
+// Config is the configuration for a Gun instance.
 type Config struct {
-	PeerURLs         []string
-	Servers          []Server
-	Storage          Storage
-	SoulGen          func() string
+	// PeerURLs is the initial set of peer URLs to connect to. This can be empty
+	// to not connect to any peers.
+	PeerURLs []string
+	// Servers is the set of local servers to listen for new peers on. This can
+	// be empty to not run any server.
+	Servers []Server
+	// Storage is the backend storage to locally store data. If not present, a
+	// NewStorageInMem is created with a value expiration of
+	// DefaultOldestAllowedStorageValue.
+	Storage Storage
+	// SoulGen is a generator for new soul values. If not present,
+	// DefaultSoulGen is used.
+	SoulGen func() string
+	// PeerErrorHandler is called on every error from or concerning a peer. Not
+	// required.
 	PeerErrorHandler func(*ErrPeer)
+	// PeerSleepOnError is the amount of time we will consider a reconnectable
+	// peer "bad" on error before attempting reconnect. If 0 (i.e. not set),
+	// DefaultPeerSleepOnError is used.
 	PeerSleepOnError time.Duration
-	MyPeerID         string
-	Tracking         Tracking
+	// MyPeerID is the identifier given for this peer to whoever asks. If empty
+	// it is set to a random string
+	MyPeerID string
+	// Tracking is how seen values are updated when they are seen on the wire.
+	// When set to TrackingNothing, no seen values will be updated. When set to
+	// TrackingRequested (the default), only values that are already in storage
+	// will be updated when seen. When set to TrackingEverything, all values
+	// seen on the wire will be stored.
+	Tracking Tracking
 }
 
+// Tracking is what to do when a value update is seen on the wire.
 type Tracking int
 
 const (
+	// TrackingRequested means any value we have already stored will be updated
+	// when seen.
 	TrackingRequested Tracking = iota
+	// TrackingNothing means no values will be updated.
 	TrackingNothing
+	// TrackingEverything means every value update is stored.
 	TrackingEverything
 )
 
+// DefaultPeerSleepOnError is the default amount of time that an errored
+// reconnectable peer will wait until trying to reconnect.
 const DefaultPeerSleepOnError = 30 * time.Second
+
+// DefaultOldestAllowedStorageValue is the default NewStorageInMem expiration.
 const DefaultOldestAllowedStorageValue = 7 * (60 * time.Minute)
 
+// New creates a new Gun instance for the given config. The given context is
+// used for all peer connection reconnects now/later, all server servings, and
+// peer message handling. Therefore it should be kept available at least until
+// Close. Callers must still call Close on complete, the completion of the
+// context does not automatically do it.
+//
+// This returns nil with an error on any initial peer connection failure (and
+// cleans up any other peers temporarily connected to).
 func New(ctx context.Context, config Config) (*Gun, error) {
 	g := &Gun{
 		currentPeers:         make([]*Peer, len(config.PeerURLs)),
@@ -62,16 +104,25 @@ func New(ctx context.Context, config Config) (*Gun, error) {
 		messageIDListeners:   map[string]chan<- *messageReceived{},
 		messageSoulListeners: map[string]chan<- *messageReceived{},
 	}
-	// Create all the peers
-	sleepOnError := config.PeerSleepOnError
-	if sleepOnError == 0 {
-		sleepOnError = DefaultPeerSleepOnError
+	// Set config defaults
+	if g.storage == nil {
+		g.storage = NewStorageInMem(DefaultOldestAllowedStorageValue)
 	}
+	if g.soulGen == nil {
+		g.soulGen = DefaultSoulGen
+	}
+	if g.peerSleepOnError == 0 {
+		g.peerSleepOnError = DefaultPeerSleepOnError
+	}
+	if g.myPeerID == "" {
+		g.myPeerID = randString(9)
+	}
+	// Create all the peers
 	var err error
 	for i := 0; i < len(config.PeerURLs) && err == nil; i++ {
 		peerURL := config.PeerURLs[i]
 		newConn := func() (PeerConn, error) { return NewPeerConn(ctx, peerURL) }
-		if g.currentPeers[i], err = newPeer(peerURL, newConn, sleepOnError); err != nil {
+		if g.currentPeers[i], err = newPeer(peerURL, newConn, g.peerSleepOnError); err != nil {
 			err = fmt.Errorf("Failed connecting to peer %v: %v", peerURL, err)
 		}
 	}
@@ -84,33 +135,27 @@ func New(ctx context.Context, config Config) (*Gun, error) {
 		}
 		return nil, err
 	}
-	// Set defaults
-	if g.storage == nil {
-		g.storage = NewStorageInMem(DefaultOldestAllowedStorageValue)
-	}
-	if g.soulGen == nil {
-		g.soulGen = DefaultSoulGen
-	}
-	if g.myPeerID == "" {
-		g.myPeerID = randString(9)
-	}
 	// Start receiving from peers
 	for _, peer := range g.currentPeers {
-		go g.startReceiving(peer)
+		go g.startReceiving(ctx, peer)
 	}
 	// Start all the servers
-	go g.startServers(config.Servers)
+	go g.startServers(ctx, config.Servers)
 	return g, nil
 }
 
-func (g *Gun) Scoped(ctx context.Context, key string, children ...string) *Scoped {
-	s := newScoped(g, nil, key)
+// Scoped returns a scoped instance to the given field and children for reading
+// and writing. This is the equivalent of calling the Gun JS API "get" function
+// (sans callback) for each field/child.
+func (g *Gun) Scoped(ctx context.Context, field string, children ...string) *Scoped {
+	s := newScoped(g, nil, field)
 	if len(children) > 0 {
 		s = s.Scoped(ctx, children[0], children[1:]...)
 	}
 	return s
 }
 
+// Close stops all peers and servers and closes the underlying storage.
 func (g *Gun) Close() error {
 	var errs []error
 	for _, p := range g.peers() {
@@ -188,11 +233,10 @@ func (g *Gun) send(ctx context.Context, msg *Message, ignorePeer *Peer) <-chan *
 	return ch
 }
 
-func (g *Gun) startReceiving(peer *Peer) {
-	// TDO: some kind of overall context is probably needed
-	ctx, cancelFn := context.WithCancel(context.TODO())
+func (g *Gun) startReceiving(ctx context.Context, peer *Peer) {
+	ctx, cancelFn := context.WithCancel(ctx)
 	defer cancelFn()
-	for !peer.Closed() {
+	for !peer.Closed() && ctx.Err() == nil {
 		// We might not be able receive because peer is sleeping from
 		// an error happened within or a just-before send error.
 		if ok, msgs, err := peer.receive(ctx); !ok {
